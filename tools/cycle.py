@@ -46,7 +46,7 @@ def main():
     _, name = slot.slot_folder(a.pc)
     t0 = time.time()
     if not a.skip_convert and not a.seg:
-        cmd = [sys.executable, '-I', os.path.join(ROOT, 'utau2vocaloid.py'), 'convert', a.bank, seg] + rest
+        cmd = [sys.executable, '-I', os.path.join(ROOT, 'henkan.py'), 'convert', a.bank, seg] + rest
         r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace')
         tail = [ln for ln in r.stdout.splitlines() if 'coverage' in ln or 'validation' in ln or 'diphones' in ln]
         print('\n'.join(tail) or r.stdout[-2000:] + r.stderr[-2000:])

@@ -133,7 +133,7 @@ def write_vsqx(path, notes, end, pc=0, name='Test', comp_id=None):
            '<pan>64</pan><vol>0</vol></vsUnit>'
            '<monoUnit><iGin>0</iGin><sLvl>-898</sLvl><sEnable>0</sEnable><m>0</m><s>0</s><pan>64</pan>'
            '<vol>0</vol></monoUnit><stUnit><iGin>0</iGin><m>0</m><s>0</s><vol>-129</vol></stUnit></mixer>'
-           '<masterTrack><seqName><![CDATA[utau2vocaloid test]]></seqName><comment><![CDATA[test]]></comment>'
+           '<masterTrack><seqName><![CDATA[Henkan test]]></seqName><comment><![CDATA[test]]></comment>'
            '<resolution>480</resolution><preMeasure>1</preMeasure>'
            '<timeSig><m>0</m><nu>4</nu><de>4</de></timeSig><tempo><t>0</t><v>12000</v></tempo></masterTrack>'
            '<vsTrack><tNo>0</tNo><name><![CDATA[Test]]></name><comment><![CDATA[Track]]></comment>'

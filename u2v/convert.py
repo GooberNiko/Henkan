@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import audio, dbtool_io, oto, phonemes as P
+from . import audio, dbtool_io, oto, phonemes as P, select as Sel
 
 TARGET_SR = 44100
 MIN_SEG = 0.012
@@ -35,14 +35,34 @@ class Clip:
 class Converter:
     def __init__(self, bank, out, lang='auto', dict_path=None, groups=None, keep=1, derive=True,
                  merge=False, fill=True, log=print, evec=True, splice=True, extend_dict=True,
-                 normalize=True, colors='main', brighten=None, avoid=(), extras=True):
+                 normalize=True, colors='main', brighten=None, avoid=(), extras=True,
+                 evec_map=None, evec_phonemes=None, custom_extras=None, evec_mode='full', v_mode='auto'):
         self.bank, self.out, self.keep, self.derive, self.log = bank, out, keep, derive, log
         self.fill, self.splice, self.normalize = fill, splice, normalize
         self.brighten = brighten or {}                       # {phoneme: dB of treble above 2 kHz}
         self.avoid = {tuple(u.split()) for u in avoid}       # units not to take from recordings
         self.colors = 'merge' if merge else colors          # main | evec | merge
         self.evec = evec and self.colors == 'evec'
-        self.extras = extras
+        # extras: True/None = all, False = none, or a spec like 'br1,brE,rr,vend'
+        if extras in (True, None):
+            self.extras_want = None
+        elif extras in (False,):
+            self.extras_want = set()
+        else:
+            self.extras_want = P.parse_extras_want(extras)
+        self.extras = self.extras_want is None or bool(self.extras_want)
+        self.evec_map = Sel.parse_evec_map(evec_map)
+        self.evec_phonemes = Sel.parse_evec_phonemes(evec_phonemes)
+        self.evec_mode = Sel.normalize_evec_mode(evec_mode)
+        self.evec_vowels_only = self.evec_mode == 'vowels'
+        # custom extras: any UTAU alias -> standalone phoneme with a chosen type
+        self.custom_extras = Sel.parse_custom_extras(custom_extras)
+        self.custom_dict = {ph: (grp, v) for _, (ph, v, grp) in self.custom_extras.items()}
+        if self.custom_extras:
+            self.log('custom extras: %s' % ', '.join('%s->%s (%s)' % (a, ph, 'voiced' if v else 'unvoiced')
+                                                     for a, (ph, v, _g) in sorted(self.custom_extras.items())))
+        if self.evec_vowels_only:
+            self.log('EVEC support mode: only vowels carry the #number (consonants stay shared)')
         self.entries = oto.read_bank(bank)
         if not self.entries:
             raise SystemExit('no oto.ini entries found under %s' % bank)
@@ -55,21 +75,41 @@ class Converter:
             # extras (breaths, rolled r ...) are used from their bonus folder even when --groups picks
             # only the singing folders
             self.entries = [e for e in self.entries if rx.search(e.group)
-                            or (extras and e.extra_folder and self._extra(e))]
+                            or (self.extras and e.extra_folder and self._extra(e))
+                            or self._custom_extra(e) is not None]
             if not self.entries:
                 raise SystemExit('--groups %r matches none of: %s' % (groups, ', '.join(all_groups)))
             self.log('using: %s' % ', '.join(sorted({e.group for e in self.entries})))
         self.assign_colors(merge)
         self.lang = P.detect_language([e.alias for e in self.entries]) if lang == 'auto' else lang
         self.log('language: %s, %d oto entries' % (self.lang, len(self.entries)))
-        self.dict = dbtool_io.load_dictionary(dict_path) if dict_path else None
-        if self.dict is not None and extend_dict and self.lang == 'ja':
-            self.dict = dbtool_io.extend_dictionary(self.dict, P.JA_EXTRA)
-        self.extras_found = sorted({p for e in self.entries for p in (self._extra(e) or []) if p in P.EXTRAS})
-        if self.dict is not None and self.extras_found:
-            self.dict = dbtool_io.extend_dictionary(self.dict, {p: P.EXTRA_DICT[p] for p in self.extras_found})
+        # ヴ: its own phonemes v / v' ('v'), sung as b / b' ('b'), or v whenever the bank recorded it ('auto')
+        if v_mode not in P.V_MODES:
+            raise ValueError('v_mode must be one of %s, not %r' % (', '.join(P.V_MODES), v_mode))
+        self.v_mode = v_mode
+        self.n_v = len(P.v_aliases([e.alias for e in self.entries])) if self.lang == 'ja' else 0
+        self.v_real = self.lang == 'ja' and (v_mode == 'v' or (v_mode == 'auto' and self.n_v > 0))
+        if self.lang == 'ja' and (self.n_v or v_mode == 'v'):
+            self.log('ヴ: %d recordings, sung as %s' % (self.n_v, "v / v'" if self.v_real else "b / b'"))
+        self.extras_found = sorted({p for e in self.entries for p in (self._extra(e) or [])
+                                    if p in P.EXTRAS or p in self.custom_dict})
+        self.dict = None
+        self.use_dictionary(dbtool_io.load_dictionary(dict_path) if dict_path else None, extend_dict)
         self.skipped = []          # (alias, wav, reason)
         self._audio = {}
+
+    def use_dictionary(self, d, extend=True):
+        """Convert against the DB phonetic dictionary d, plus the phonemes this bank brings that it lacks:
+        b, b', p\\' (extend), v / v', breaths and other extras, custom extras."""
+        if d is not None:
+            if extend and self.lang == 'ja':
+                d = dbtool_io.extend_dictionary(d, P.JA_EXTRA)
+            if self.v_real:
+                d = dbtool_io.extend_dictionary(d, P.V_DICT)
+            add = {p: P.EXTRA_DICT[p] for p in self.extras_found if p in P.EXTRA_DICT}
+            add.update({p: self.custom_dict[p] for p in self.extras_found if p in self.custom_dict})
+            d = dbtool_io.extend_dictionary(d, add)
+        self.dict = d
 
     # -------------------------------------------------------------- voice colours and pitches
     def assign_colors(self, merge):
@@ -98,7 +138,14 @@ class Converter:
                 merge_to[c] = next((k for k in sorted(keep, key=lambda k: -size[k])
                                     if k.startswith(c) or c.startswith(k)), default)
         order = [default] + sorted((k for k in keep if k != default), key=lambda k: (-size[k], k))
-        self.color_suffix = {k: '#%d' % i if i and self.evec else '' for i, k in enumerate(order)}
+        if self.evec_map and any(v and v[:1] == '#' for v in self.evec_map.values()) \
+                and not self.evec and self.colors == 'main':
+            self.colors, self.evec = 'evec', True
+            self.log('EVEC numbers chosen: converting all colours (--colors evec)')
+        if self.evec_vowels_only and not self.evec and self.colors == 'main':
+            self.colors, self.evec = 'evec', True
+            self.log('EVEC support mode: converting all colours (--colors evec)')
+        self.color_suffix, self.color_dropped = Sel.apply_evec_map(order, '', self.evec, self.evec_map, self.log)
         for e in self.entries:
             e.color = merge_to.get(e.color, e.color)
         if self.colors == 'main' and len(order) > 1:
@@ -108,6 +155,10 @@ class Converter:
                      % (default, ', '.join(order[1:])))
             self.entries = [e for e in self.entries if e.color == default]
             order = [default]
+        if getattr(self, 'color_dropped', None):
+            self.entries = [e for e in self.entries if e.color not in self.color_dropped]
+            order = [c for c in order if c not in self.color_dropped]
+            self.log('skipped colours: %s' % ', '.join(self.color_dropped))
         # extras recorded without a pitch (bonus folders) join that colour's most common pitch
         common = {}
         for k in order:
@@ -125,7 +176,44 @@ class Converter:
 
     def suffixer(self, group):
         sfx = self.color_suffix[self.group_color[group]]
+        if self.evec_vowels_only:
+            # EVEC support mode: only vowels carry the colour number, consonants (and breaths,
+            # rolled r, customs) stay shared so joins crossfade across colours without typing k#1
+            return lambda p: p if not sfx or p in P.SIL or p not in P.VOWELS else p + sfx
         return lambda p: p if not sfx or p in P.SIL else p + sfx
+
+    def extra_phonemes(self):
+        return P.EXTRAS | set(self.custom_dict)
+
+    def _extra_voiced(self, ex):
+        if ex in P.TRILL:
+            return True
+        if ex in self.custom_dict:
+            return self.custom_dict[ex][1]
+        return False
+
+    def _color_allows(self, color, phs):
+        # per-colour phoneme allowlist (--evec-phonemes Soft:a,i,e): an entry is kept when every
+        # non-silence phoneme it maps to is selected. None = all phonemes.
+        if not self.evec_phonemes or color not in self.evec_phonemes:
+            return True
+        want = self.evec_phonemes[color]
+        return all(p in want or p in P.SIL for p in phs)
+
+    def _warn_no_vowels(self, clips):
+        # a colour with no vowels in its selected entries still converts (warn, proceed anyway)
+        if not self.evec_phonemes:
+            return
+        have = defaultdict(set)
+        for c in clips:
+            for p in c.phns:
+                if p in P.VOWELS or p in P.SUSTAINED:
+                    have[c.entry.color].add(p)
+        for color in self.evec_phonemes:
+            if color in have or color not in set(self.color_suffix):
+                continue
+            self.log('WARNING: colour %s (%s) has no vowels in its selected entries: '
+                     'transitions will be spliced or missing, proceeding anyway' % (color, self.color_suffix[color] or 'main'))
 
     # -------------------------------------------------------------- audio cache
     def load(self, path):
@@ -136,11 +224,32 @@ class Converter:
         return self._audio[path]
 
     # -------------------------------------------------------------- phonemes
-    def _extra(self, e):
-        """Phonemes of an UTAU extra (breath, vowel ending, rolled r), or None."""
-        if not self.extras:
+    def _custom_extra(self, e):
+        """A user-defined extra: exact alias match -> [Sil, PH, Sil], or None.
+
+        Matches the oto alias as written (raw_alias) and the stripped alias, so
+        'cough', 'cough3' suffixes and prefix.map tags all resolve."""
+        if not self.custom_extras:
             return None
-        return P.extra_alias(e.alias + (str(e.dup) if e.dup else ''), getattr(e, 'extra_folder', False))
+        for key in (e.raw_alias.strip(), e.alias.strip()):
+            if key in self.custom_extras:
+                return ['Sil', self.custom_extras[key][0], 'Sil']
+            for alias, (ph, _v, _g) in self.custom_extras.items():
+                if key.lower() == alias.lower():
+                    return ['Sil', ph, 'Sil']
+        return None
+
+    def _extra(self, e):
+        """Phonemes of an UTAU extra (breath, vowel ending, rolled r, custom), or None."""
+        ce = self._custom_extra(e)
+        if ce is not None:
+            return ce  # explicitly requested: not gated by the built-in extras filter
+        if not self.extras:
+            return None  # filtered
+        ex = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''), getattr(e, 'extra_folder', False))
+        if ex is not None and self.extras_want is not None and P.extra_kind(ex) not in self.extras_want:
+            return None
+        return ex
 
     def map_phonemes(self, e):
         ex = self._extra(e)
@@ -148,17 +257,20 @@ class Converter:
             if self.dict is not None and any(p not in self.dict for p in ex):
                 return None, 'extra phoneme not in DB dictionary'
             return ex, None
+        if self.extras_want is not None:
+            raw = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''), getattr(e, 'extra_folder', False))
+            if raw is not None:
+                return None, 'extra %s not selected' % P.extra_kind(raw)
         ph = None
         if self.lang == 'en' and e.full and e.full != e.alias:
             ph = P.alias_to_phonemes(e.full, 'en')       # "b3" is b + 3 (bird), not "b" duplicate 3
-        ph = ph or P.alias_to_phonemes(e.alias, self.lang)
+        ph = ph or P.alias_to_phonemes(e.alias, self.lang, self.v_real)
         if ph is None:
             return None, 'alias not understood'
         if self.dict is not None:
             out = []
             for p in ph:
-                if p not in self.dict and p in P.JA_FALLBACK and P.JA_FALLBACK[p] in self.dict:
-                    p = P.JA_FALLBACK[p]
+                p = P.fallback(p, self.dict)
                 if p not in self.dict:
                     return None, 'phoneme %r not in DB dictionary' % p
                 out.append(p)
@@ -226,7 +338,7 @@ class Converter:
         return Clip(e, phs, start, min(dur, b3 + 0.15), [tv, b2, b3], [True, True, True], mute_after=b3), None
 
     def segment(self, e, phs):
-        if any(p in P.EXTRAS for p in phs) or self._extra(e) is not None:
+        if any(p in self.extra_phonemes() for p in phs) or self._extra(e) is not None:
             return self.segment_extra(e, phs)
         x, ft = self.load(e.wav)
         dur = len(x) / TARGET_SR
@@ -366,8 +478,9 @@ class Converter:
                     chosen[len(clips) - 1].append(i)
                     cands[(g, X, Y)].append((self.unit_score(made, i), len(clips) - 1, i))
             # extras: let breaths and the rolled r follow or lead into any sung vowel without a rest
-            if self.extras and self.splice:
-                here = {p for (gg, a, b) in cands if gg == g for p in (a, b) if p in P.EXTRAS}
+            if (self.extras or self.custom_extras) and self.splice:
+                here = {p for (gg, a, b) in cands if gg == g for p in (a, b)
+                        if p in self.extra_phonemes()}
                 want = set()
                 onsets = sorted({k[2] for k in cands if k[0] == g and k[1] == 'Sil'
                                  and k[2] not in P.VOWELS and k[2] not in P.EXTRAS})
@@ -420,7 +533,7 @@ class Converter:
         if L < 0.08:
             return None
         vow = audio.cut(xv_, int(steady * sr), int((steady + L) * sr))
-        voiced = ex in P.TRILL
+        voiced = self._extra_voiced(ex)
         f = int((0.02 if voiced else 0.012) * sr)
         if vo == X:                                              # [V extra]: vowel, then the extra
             ext = audio.cut(xe_, int(eb * sr), int((ee + 0.12) * sr))
@@ -1116,6 +1229,9 @@ class Converter:
             if phs is None:
                 self.skipped.append((e.raw_alias, e.wav, why))
                 continue
+            if not self._color_allows(e.color, phs):
+                self.skipped.append((e.raw_alias, e.wav, 'phoneme not selected for colour %s' % e.color))
+                continue
             if not os.path.exists(e.wav):
                 self.skipped.append((e.raw_alias, e.wav, 'wav missing'))
                 continue
@@ -1129,6 +1245,7 @@ class Converter:
             if self.derive:
                 clips.extend(self.derive_silence(c))
 
+        self._warn_no_vowels(clips)
         # pick the best clip for every (group, diphone)
         self.typical = self._typical_spectra(clips)
         n_src = defaultdict(set)                  # recordings per unit: an odd one is only dropped if
@@ -1142,7 +1259,7 @@ class Converter:
                     continue
                 replaceable = (len(n_src[(c.entry.group, c.phns[i], c.phns[i + 1])]) > 1
                                or c.phns[i] in P.SUSTAINED or c.phns[i] in P.NASAL)
-                natural = any(p in P.EXTRAS for p in c.phns)     # a vowel trailing into a breath is meant to
+                natural = any(p in self.extra_phonemes() for p in c.phns)  # a vowel trailing into a breath is meant to
                 if self.splice and replaceable and not natural and self._atypical(c, i) > 2.0:
                     self.skipped.append((c.entry.raw_alias, c.entry.wav,
                                          'vowel sounds unlike the rest of the bank (e.g. a trailing-off '
@@ -1268,7 +1385,14 @@ class Converter:
                     if (g, n) not in final and (self.dict is None or n in self.dict):
                         jobs.append((g, n, 'N\\', final[(g, 'N\\')]))
         nstat = 0
+        seen_stat = {}  # vowels-only EVEC: shared consonants get one stationary (from the main colour)
+        if self.evec_vowels_only:
+            jobs.sort(key=lambda j: (self.suffixer(j[0])(j[1]) != j[1], j[0], j[1]))
         for g, p, src, lst in jobs:
+            sx0 = self.suffixer(g)
+            if self.evec_vowels_only and sx0(p) in seen_stat and seen_stat[sx0(p)] != g:
+                continue
+            seen_stat.setdefault(sx0(p), g)
             for k, (_, ci, sb, se) in enumerate(lst[:self.keep]):
                 c = clips[ci]
                 x, ft = self.load(c.entry.wav)
@@ -1321,7 +1445,8 @@ class Converter:
         self.dict_out = None
         if self.dict is not None:
             sfx = sorted({v for v in self.color_suffix.values() if v})
-            dbtool_io.write_dictionary(os.path.join(self.out, 'dictionary.txt'), self.dict, sfx)
+            dbtool_io.write_dictionary(os.path.join(self.out, 'dictionary.txt'), self.dict, sfx,
+                                       vowels_only=self.evec_vowels_only)
             self.dict_out = dbtool_io.load_dictionary(os.path.join(self.out, 'dictionary.txt'))
         self.write_report(produced, groups, gid, len(manifest) - nstat, nstat, manifest)
         return manifest
@@ -1335,7 +1460,7 @@ class Converter:
         V = ['a', 'i', 'M', 'e', 'o']
         cons, cv = set(), set()
         for rom in set(P.KANA.values()):
-            ph = P.ja_syllable(rom)
+            ph = P.ja_syllable(rom, self.v_real)
             if ph and len(ph) == 2:
                 cv.add(tuple(ph))
                 cons.add(ph[0])
@@ -1394,15 +1519,22 @@ class Converter:
             lines.append('CV entries whose offset cut into the consonant (closure, nasal murmur), start moved back: %d'
                          % self.n_closure)
         if getattr(self, 'extras_found', None):
+            xp = P.EXTRAS | set(getattr(self, 'custom_dict', {}))
             units = sorted({row[2] for row in manifest if row[1] == 'art'
-                            and any(p.split('#')[0] in P.EXTRAS for p in row[2].split())})
+                            and any(p.split('#')[0] in xp for p in row[2].split())})
             lines.append('extras (type these phonemes in the editor): %s' % ', '.join(self.extras_found))
             what = {'brE': 'breath out at the end of a phrase', 'brI': 'breath in', 'rr': 'rolled r'}
             for x in self.extras_found:
+                if x not in what:
+                    what[x] = 'custom extra' if x in getattr(self, 'custom_dict', {}) else 'breath'
                 src = sorted({row[4] for row in manifest if row[1] == 'art' and not row[8]
                               and x in [p.split('#')[0] for p in row[2].split()]})
                 lines.append('  %-4s %-36s from: %s' % (x, what.get(x, 'breath'), ', '.join(src) or '-'))
             lines.append('  units: %s' % ', '.join('[%s]' % u for u in units))
+        if getattr(self, 'n_v', 0) or getattr(self, 'v_real', False):
+            lines.append("ヴ (%d recordings): sung as %s" % (
+                self.n_v, "v / v' (type v a, v' i in the editor)" if self.v_real
+                else "b / b' (--v-mode v gives it its own v / v')"))
         lines.append('')
         if self.dict is not None:
             lines += ['Create the singer database from dictionary.txt in this folder',

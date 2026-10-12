@@ -33,6 +33,50 @@ for _s, _d in ((UNV_PLOSIVE, .07), (UNV_FRIC, .10), (UNV_AFFR, .10), (V_PLOSIVE,
 TYPICAL_DUR['h'] = .08
 TYPICAL_DUR['N\\'] = .12
 
+# choosable extras: standalone breaths br1..br5, breath out/in, rolled r, vowel endings ([V Sil] from "a R")
+EXTRA_CHOICES = ['br1', 'br2', 'br3', 'br4', 'br5', 'brE', 'brI', 'rr', 'vend']
+
+
+def extra_kind(phs):
+    """Which choosable extra a mapped extra sequence is: 'br1'..'br5', 'brE', 'brI', 'rr' or 'vend'."""
+    for p in phs:
+        if p in BREATHS:
+            return p
+        if p in TRILL:
+            return 'rr'
+    return 'vend'
+
+
+def parse_extras_want(spec):
+    """'br1,brE,rr,vend' (or 'br' for br1..br5, 'all', 'none') -> set of EXTRA_CHOICES. None = all."""
+    if spec is None or spec is True:
+        return None
+    if spec is False:
+        return set()
+    if isinstance(spec, (set, list, tuple)):
+        toks = list(spec)
+    else:
+        toks = re.split(r'[,;\s]+', str(spec).strip())
+    out = set()
+    for t in toks:
+        t = t.strip()
+        if not t:
+            continue
+        tl = t.lower()
+        if tl in ('all', '*'):
+            return None
+        if tl in ('none', 'off', 'no'):
+            return set()
+        if tl == 'br':
+            out.update('br%d' % i for i in range(1, 6))
+        elif t in EXTRA_CHOICES:
+            out.add(t)
+        elif tl in EXTRA_CHOICES:
+            out.add(tl)
+        else:
+            raise ValueError("unknown extra %r (choose from %s)" % (t, ', '.join(EXTRA_CHOICES)))
+    return out
+
 
 def pclass(ph):
     if ph in SIL:
@@ -67,6 +111,11 @@ JA_CONS = {
     'p': ('p', "p'"), 'm': ('m', "m'"), 'y': ('j', 'j'), 'r': ('4', "4'"), 'w': ('w', 'w'),
     'v': ('b', "b'"),
 }
+# ヴ as its own phoneme: v, and v' before i (vi, vyu) like k / k'. Without it ヴ sings as b / b'.
+JA_V = ('v', "v'")
+V_PHONEMES = set(JA_V)
+V_DICT = {p: ('VoicedFricatives', True) for p in JA_V}
+V_MODES = ('auto', 'v', 'b')
 # y-glide labels -> base label
 JA_PAL = {'ky': 'k', 'gy': 'g', 'ty': 't', 'dy': 'd', 'ny': 'n', 'hy': 'h', 'fy': 'f', 'by': 'b',
           'py': 'p', 'my': 'm', 'ry': 'r', 'vy': 'v'}
@@ -76,7 +125,8 @@ JA_INITIAL = {'z': 'dz', 'Z': 'dZ'}
 # relabel substitutes used to fill units a bank never recorded (closures sound alike)
 SUBST = {"k'": ['k'], "g'": ['g'], "t'": ['t'], "d'": ['d'], "p'": ['p'], "b'": ['b'], "m'": ['m'],
          "4'": ['4'], 'J': ['n'], 'C': ['h'], "p\\'": ['p\\'], 'dz': ['z'], 'dZ': ['Z'], 'z': ['dz'],
-         'Z': ['dZ'], 'N': ['N\\', 'n'], "N'": ['N\\', 'n'], 'm': ['N\\'], 'n': ['N\\']}
+         'Z': ['dZ'], 'N': ['N\\', 'n'], "N'": ['N\\', 'n'], 'm': ['N\\'], 'n': ['N\\'],
+         "v'": ['v']}
 # in [C V] units only these are close enough to swap
 SUBST_CV = {"p\\'": ['p\\'], 'dz': ['z'], 'dZ': ['Z'], 'z': ['dz'], 'Z': ['dZ']}
 
@@ -90,7 +140,15 @@ NUMBERING = re.compile(r'(^|/)\s*\d+\s*[.)_\-]\s*')     # "4. F3", "11. CONSONAN
 MAIN_COLOR = re.compile(r'normal|standard|std|main|default|通常|ノーマル|標準', re.I)
 
 # fallbacks when the DB dictionary lacks a phoneme
-JA_FALLBACK = {"p\\'": 'p\\', 'h\\': 'h', "b'": 'b'}
+JA_FALLBACK = {"p\\'": 'p\\', 'h\\': 'h', "b'": 'b', 'v': 'b', "v'": "b'"}
+
+
+def fallback(p, have):
+    """p, or the closest phoneme `have` holds (v' -> b' -> b); p itself when nothing fits."""
+    q = p
+    while q not in have and q in JA_FALLBACK:
+        q = JA_FALLBACK[q]
+    return q if q in have else p
 
 _KANA = """
 あ a い i う u え e お o か ka き ki く ku け ke こ ko が ga ぎ gi ぐ gu げ ge ご go
@@ -106,7 +164,7 @@ _KANA = """
 ひゃ hya ひゅ hyu ひぇ hye ひょ hyo ふぁ fa ふぃ fi ふぇ fe ふぉ fo ふゅ fyu
 びゃ bya びゅ byu びぇ bye びょ byo ぴゃ pya ぴゅ pyu ぴぇ pye ぴょ pyo
 みゃ mya みゅ myu みぇ mye みょ myo りゃ rya りゅ ryu りぇ rye りょ ryo
-いぇ ye うぃ wi うぇ we うぉ wo ゔぁ va ゔぃ vi ゔぇ ve ゔぉ vo
+いぇ ye うぃ wi うぇ we うぉ wo ゔぁ va ゔぃ vi ゔぇ ve ゔぉ vo ゔゅ vyu
 """
 KANA = dict(zip(_KANA.split()[0::2], _KANA.split()[1::2]))
 JA_CONS_LABELS = sorted(set(JA_CONS) | set(JA_PAL), key=len, reverse=True)
@@ -126,16 +184,37 @@ def kana_to_romaji(s):
         elif s[i] in KANA:
             out.append(KANA[s[i]])
             i += 1
+        elif s[i] in 'っッ':
+            out.append('Q')  # sokuon: glottal stop, resolved by ja_syllable
+            i += 1
         else:
             return None
     return out
 
 
-def ja_syllable(rom):
-    """romaji syllable -> list of phonemes (without context rules), or None."""
+def _ja_cons(label, v):
+    return JA_V if v and label == 'v' else JA_CONS[label]
+
+
+def ja_syllable(rom, v=False):
+    """romaji syllable -> list of phonemes (without context rules), or None. v: ヴ is v / v', not b / b'."""
     rom = rom.lower()
     if rom in ('n', 'nn', "n'"):
         return ['N\\']
+    if rom == 'q':  # bare sokuon っ: glottal stop (devkit Silence group has '?')
+        return ['?']
+    if rom.endswith('q') and len(rom) > 1:  # C + sokuon: てっ -> te + glottal stop
+        base = ja_syllable(rom[:-1], v)
+        return None if base is None else base + ['?']
+    if len(rom) == 2 and rom[0] in JA_VOWEL and rom[1] in JA_VOWEL:
+        v1, v2 = JA_VOWEL[rom[0]], JA_VOWEL[rom[1]]
+        return [v1] if v1 == v2 else [v1, v2]  # おぁ -> [o, a], あぁ stays [a]
+    if len(rom) == 3 and rom[1] in JA_VOWEL and rom[2] in JA_VOWEL:
+        c = ja_consonant(rom[0], v)  # CVV offglide: てぅ -> [t, e, u], どぉ -> [d, o]
+        if c is None:
+            return None
+        v1, v2 = JA_VOWEL[rom[1]], JA_VOWEL[rom[2]]
+        return [c, v1] if v1 == v2 else [c, v1, v2]
     if rom == 'shi':
         return ['S', 'i']
     if rom == 'chi':
@@ -148,49 +227,52 @@ def ja_syllable(rom):
         return ['Z', 'i']
     if not rom or rom[-1] not in JA_VOWEL:
         return None
-    label, v = rom[:-1], rom[-1]
-    vowel = JA_VOWEL[v]
+    label, vw = rom[:-1], rom[-1]
+    vowel = JA_VOWEL[vw]
     if label in JA_PAL:
-        cons = JA_CONS[JA_PAL[label]][1]
+        cons = _ja_cons(JA_PAL[label], v)[1]
     elif label in JA_CONS:
-        plain, pal = JA_CONS[label]
-        cons = pal if v == 'i' and label not in ('s', 'z', 'ts', 'w', 'y') else plain
+        plain, pal = _ja_cons(label, v)
+        cons = pal if vw == 'i' and label not in ('s', 'z', 'ts', 'w', 'y') else plain
     else:
         return None
     return [vowel] if cons is None else [cons, vowel]
 
 
-def ja_consonant(label):
+def ja_consonant(label, v=False):
     """CVVC VC right side ('k', 'ky', 'sh', 'n' ...) -> consonant phoneme or None."""
     label = label.lower()
     if label in JA_PAL:
-        return JA_CONS[JA_PAL[label]][1]
+        return _ja_cons(JA_PAL[label], v)[1]
     if label in JA_CONS and label:
-        return JA_CONS[label][0]
+        return _ja_cons(label, v)[0]
     if label == 'ng':
         return 'N'
     return None
 
 
-def ja_token(tok):
+def ja_token(tok, v=False):
     """One alias token -> (kind, phonemes). kind: 'sil', 'syl', 'cons', 'skip'."""
     if tok in ('-', 'R', '_', 'sil', 'Sil'):
         return 'sil', ['Sil']
     if tok in ('息', '吸', 'br', 'breath', '・', '?'):
         return 'skip', []
     if re.search(r'[぀-ヿ]', tok):
-        rom = kana_to_romaji(tok.replace('・', ''))
-        if not rom or len(rom) != 1 or '・' in tok:
+        tok = tok.rstrip("'’")  # edge-bank tag leaking into the alias: く' is just く
+        if '・' in tok:
             return 'skip', []
-        tok = rom[0]
+        rom = kana_to_romaji(tok)
+        if not rom:
+            return 'skip', []
+        tok = ''.join(rom)  # multi-char for small-kana combos: てぅ -> 'teu', てっ -> 'teQ'
         if tok == 'n':
             return 'syl', ['N\\']
     elif tok.lower() in ('n', 'nn'):
         return 'cons', ['n']          # romaji n: VC consonant on the right, ん elsewhere
-    syl = ja_syllable(tok)
+    syl = ja_syllable(tok, v)
     if syl is not None:
         return 'syl', syl
-    c = ja_consonant(tok)
+    c = ja_consonant(tok, v)
     if c is not None:
         return 'cons', [c]
     return 'skip', []
@@ -200,7 +282,7 @@ def nasal_before(nxt):
     """Context variant of ん given the following phoneme."""
     if nxt in ('k', "k'", 'g', "g'", 'N'):
         return 'N'
-    if nxt in ('p', "p'", 'b', "b'", 'm', "m'"):
+    if nxt in ('p', "p'", 'b', "b'", 'm', "m'", 'v', "v'"):
         return 'm'
     if nxt in ('t', "t'", 'd', "d'", 'ts', 'tS', 'dz', 'dZ', 'n', 'J', '4', "4'", 'z', 'Z'):
         return 'n'
@@ -209,12 +291,14 @@ def nasal_before(nxt):
     return 'N\\'
 
 
-def ja_alias(alias):
-    """Japanese alias -> phoneme list, or None to skip."""
+def ja_alias(alias, v=False):
+    """Japanese alias -> phoneme list, or None to skip. v: ヴ is v / v', not b / b'."""
+    alias = re.sub(r'^\*+\s*', '', alias)  # '* あ': spare trigger of the same recording
+    alias = re.sub(r'^[xXｘＸ](?=[぀-ヿ巻])', '', alias)  # 'xか': extra take of the same syllable
     toks = alias.split()
     if not toks or len(toks) > 2:
         return None
-    parsed = [ja_token(t) for t in toks]
+    parsed = [ja_token(t, v) for t in toks]
     if any(k == 'skip' for k, _ in parsed):
         return None
     if len(parsed) == 1:
@@ -339,8 +423,13 @@ def detect_language(aliases):
     return 'en' if en + xs > ja else 'ja'
 
 
-def alias_to_phonemes(alias, lang):
-    return en_alias(alias) if lang == 'en' else ja_alias(alias)
+def alias_to_phonemes(alias, lang, v=False):
+    return en_alias(alias) if lang == 'en' else ja_alias(alias, v)
+
+
+def v_aliases(aliases):
+    """The aliases of a Japanese bank that sing ヴ (ゔぁ, "a ヴぃ", CVVC "a v" ...)."""
+    return [a for a in aliases if any(p in V_PHONEMES for p in ja_alias(a, True) or ())]
 
 
 _EXTRA_V = {'a': 'a', 'i': 'i', 'u': 'M', 'e': 'e', 'o': 'o', 'n': 'N\\',
@@ -350,7 +439,9 @@ _EXTRA_V = {'a': 'a', 'i': 'i', 'u': 'M', 'e': 'e', 'o': 'o', 'n': 'N\\',
 def extra_alias(alias, extra_folder=False):
     """UTAU extras -> phonemes, or None. "a R" vowel ending, "a R息" vowel + breath out, "a R吸" vowel,
     pause, breath in, "息1" / "breath2" (or "b1" inside an extras folder) breaths, "巻" / "rr" rolled r."""
-    a = alias.strip().replace('ｘ', 'x')
+    a = alias.strip().replace('ｘ', 'x').replace('Ｘ', 'x')
+    a = re.sub(r'^\*+\s*', '', a)
+    a = re.sub(r'^[xX](?=[぀-ヿ巻])', '', a)
     m = re.fullmatch(r'([aiueonあいうえおん])\s*R\s*(息|吸)?\s*[↑↓]?\d*', a)
     if m:
         v = _EXTRA_V[m.group(1)]

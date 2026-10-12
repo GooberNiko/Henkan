@@ -30,3 +30,6 @@ report.txt
 dictionary.txt
 singer.inf
 epr_templates.txt
+
+# local Opus 5.5 snapshot zip (see backup/)
+backup/

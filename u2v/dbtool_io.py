@@ -26,7 +26,8 @@ def load_dictionary_txt(path):
     d = PhoneticDict()
     group, voiced = None, None
     lines = open(path, encoding='latin-1').read().splitlines(True)
-    ours = bool(lines) and 'utau2vocaloid' in lines[0]      # our files write "a#1" as "aX1" (EVEC_STANDIN)
+    # our files write "a#1" as "aX1" (EVEC_STANDIN); ones written before the rename say utau2vocaloid
+    ours = bool(lines) and ('Henkan' in lines[0] or 'utau2vocaloid' in lines[0])
     for raw in lines:
         if ours:
             raw = re.sub(r'(\S)X(\d+)\s*$', lambda m: m.group(1) + '#' + m.group(2) + '\n', raw)
@@ -77,20 +78,25 @@ def extend_dictionary(d, extra):
 EVEC_STANDIN = 'X'     # "#" starts a comment in DBTool dictionaries: "a#1" is written "aX1", then patched
 
 
-def write_dictionary(path, d, suffixes=()):
+def write_dictionary(path, d, suffixes=(), vowels_only=False):
     """Write d as a DBTool dictionary .txt, plus every non-silence phoneme again with each suffix
     ("a" -> "a#1"), so a singer DB created from it accepts EVEC-style colours. The DBTool's dictionary
     reader cuts lines at "#", so suffixed names are written with EVEC_STANDIN ("aX1"); `build` renames
-    them in the new DB's phoneme table (patch_evec_names) before any unit is added."""
+    them in the new DB's phoneme table (patch_evec_names) before any unit is added.
+    With vowels_only=True (EVEC support mode) only vowels get suffixed copies, so
+    consonants stay shared across colours and joins crossfade without typing k#1."""
     groups = {}
     for ph, v in d.voiced.items():
         g = d.groups.get(ph) or ('Voiced' if v else 'Unvoiced')
         groups.setdefault((g, v), []).append(ph)
-    lines = ['# written by utau2vocaloid: create the singer database from this file', '']
+    lines = ['# written by Henkan: create the singer database from this file', '']
     for (g, v), phs in groups.items():
         lines.append('phonetic_group(name="%s", voiced=%s):' % (g, 'true' if v else 'false'))
         lines += ['\t' + p for p in phs]
         if g != 'Silence':
+            if vowels_only:
+                from . import phonemes as _P
+                phs = [p for p in phs if p in _P.VOWELS]
             lines += ['\t' + p + s.replace('#', EVEC_STANDIN) for s in suffixes for p in phs]
         lines.append('')
     with open(path, 'w', encoding='latin-1', newline='\r\n') as f:

@@ -1,2 +1,2 @@
-"""utau2vocaloid: port UTAU voicebanks to VOCALOID3 singer databases."""
-__version__ = '1.0.4'
+"""Henkan 変換 (formerly utau2vocaloid): port UTAU voicebanks to VOCALOID singer databases."""
+__version__ = '1.0.5'
