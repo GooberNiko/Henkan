@@ -26,7 +26,7 @@ click "Add Articulations" 790 times with your own human finger.
 
 **Jump to:** [Quick start](#-quick-start-the-i-just-want-it-to-sing-path) ·
 [The window](#%EF%B8%8F-the-window) · [Extras](#%EF%B8%8F-extras-breaths-rolled-r-end-breaths) ·
-[ヴ](#-ヴ-gets-a-real-v-v-and-v) · [Voice colours](#-voice-colours-evec) ·
+[ヴ](#🅥-ヴ-gets-a-real-v-v-and-v) · [Voice colours](#-voice-colours-evec) ·
 [Pack & Install](#-pack--install-tab-3-your-bank-in-a-real-editor) ·
 [V3→V2](#-v3v2-backport-tab-4-your-v3v4-banks-in-vocaloid2) ·
 [Command line](#%EF%B8%8F-command-line-for-people-who-think-guis-are-for-cowards) ·
