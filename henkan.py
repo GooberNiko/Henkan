@@ -61,10 +61,9 @@ def main():
     c.add_argument('--no-normalize', action='store_true',
                    help="keep each recording's own loudness (default: match every unit's vowels to the bank's "
                         "usual level so joins don't jump)")
-    c.add_argument('--extras', default='all', metavar='LIST',
-                   help='which extras to convert: comma list from br1..br5, brE (breath out), '
-                        'brI (breath in), rr (rolled r), vend (vowel endings); '
-                        "all (default), none, or br for br1..br5")
+    c.add_argument('--extras', default='all', metavar='vend|none',
+                   help='vowel endings: "a R" -> [a Sil] (vend, the default) or none. Breaths, rolled r and the '
+                        'like are custom extras now (--custom-extra)')
     c.add_argument('--no-extras', action='store_true',
                    help='same as --extras none')
     c.add_argument('--evec-map', default=None, metavar='"C=#N,..."',
@@ -76,7 +75,9 @@ def main():
                         'a colour with no vowels warns but still converts')
     c.add_argument('--custom-extra', action='append', default=[], metavar='"ALIAS=PH:TYPE"',
                    help='custom extra: port ANY bank sound as its own phoneme, e.g. '
-                        'cough=ch:UnvoicedPlosives, laugh=la:Vowels. Repeatable. The phoneme is added '
+                        'cough=ch:UnvoicedPlosives, laugh=la:Vowels, "a R=hh:Breaths:end". An alias that starts '
+                        'with a vowel keeps its recorded transition ([a hh]); several aliases may share one '
+                        'phoneme; :end = only ends a phrase (no joins into vowels). Repeatable. The phoneme is added '
                         'to dictionary.txt in the phonetic group you pick (Vowels, Semivowels, Nasals, '
                         'UnvoicedFricatives, VoicedFricatives, Whisper, VoicedAffricates, '
                         'UnvoicedAffricates, Liquids, UnvoicedPlosives, VoicedPlosives, Silence; '
@@ -239,9 +240,9 @@ def main():
         for fn in os.listdir(a.out):
             if fn.endswith('.trans'):
                 used.update(dbtool_io.read_trans(os.path.join(a.out, fn))[0])
-        extra = {p: v for p, v in {**P.JA_EXTRA, **P.V_DICT, **P.EXTRA_DICT}.items() if p in used and p not in d}
+        extra = {p: v for p, v in {**P.JA_EXTRA, **P.V_DICT}.items() if p in used and p not in d}
         if extra:
-            # e.g. the devkit's own dictionary copied in by hand: it lacks b, b', p\', v, v' (and extras)
+            # e.g. the devkit's own dictionary copied in by hand: it lacks b, b', p\', v, v'
             print('dictionary.txt lacks %s: adding them' % '  '.join(sorted(extra)))
             d = dbtool_io.extend_dictionary(d, extra)
             dbtool_io.write_dictionary(dpath, d)
@@ -263,13 +264,17 @@ def main():
         return 1 if failed else 0
 
     if a.cmd == 'convert':
-        conv = convert.Converter(a.bank, a.out, a.lang, None, a.groups, a.keep, not a.no_derive,
-                                 a.merge_groups, not a.no_fill, colors=a.colors,
-                                 splice=not a.no_splice, normalize=not a.no_normalize,
-                                 brighten={k: float(v) for k, v in (b.split('=') for b in a.brighten)},
-                                 avoid=a.avoid, extras='none' if a.no_extras else a.extras,
-                                 evec_map=a.evec_map, evec_phonemes=a.evec_phonemes,
-                                 custom_extras=a.custom_extra, evec_mode=a.evec_mode, v_mode=a.v_mode)
+        try:
+            conv = convert.Converter(a.bank, a.out, a.lang, None, a.groups, a.keep, not a.no_derive,
+                                     a.merge_groups, not a.no_fill, colors=a.colors,
+                                     splice=not a.no_splice, normalize=not a.no_normalize,
+                                     brighten={k: float(v) for k, v in (b.split('=') for b in a.brighten)},
+                                     avoid=a.avoid, extras='none' if a.no_extras else a.extras,
+                                     evec_map=a.evec_map, evec_phonemes=a.evec_phonemes,
+                                     custom_extras=a.custom_extra, evec_mode=a.evec_mode, v_mode=a.v_mode)
+        except ValueError as ex:             # a bad option value (old --extras br1, a typo in a spec ...)
+            print('error: %s' % ex)
+            return 2
         if a.list_unknown:
             from u2v import select as _Sel
             for raw, grp in _Sel.find_unmapped(a.bank, conv.lang):

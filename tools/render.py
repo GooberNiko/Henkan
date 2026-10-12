@@ -57,8 +57,12 @@ SONGS_EN = {
 }
 
 
+# the extras song's phonemes: map the bank's breaths etc. to these names as custom extras to render it
+SONG_EXTRAS = {'br1', 'br2', 'br3', 'br4', 'br5', 'brE', 'brI', 'rr'}
+
+
 def syllable_phonemes(rom):
-    if rom in P.EXTRAS:                       # br1, brE, rr ... sung as their own note
+    if rom in SONG_EXTRAS:                    # br1, brE, rr ... sung as their own note
         return [rom]
     if rom.startswith('rr') and P.ja_syllable(rom[2:]) and len(P.ja_syllable(rom[2:])) == 1:
         return ['rr'] + P.ja_syllable(rom[2:])          # "rra": rolled r into a vowel

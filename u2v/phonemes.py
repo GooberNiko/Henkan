@@ -17,12 +17,9 @@ LIQUID = {'4', "4'", 'l', 'l0', 'r', 'R', 'rr'}
 SEMI = {'w', 'j'}
 SUSTAINED = VOWELS | {'N\\'}          # get stationaries
 
-# extras: breaths (br1..br5 standalone, brE breath out after a vowel, brI breath in) and a rolled r
-BREATHS = {'br1', 'br2', 'br3', 'br4', 'br5', 'brE', 'brI'}
-TRILL = {'rr'}
-EXTRAS = BREATHS | TRILL
-UNV_FRIC_EXTRA = BREATHS                 # boundary finding treats a breath like an unvoiced fricative
-EXTRA_DICT = {**{b: ('Breaths', False) for b in BREATHS}, 'rr': ('Trills', True)}
+# The one built-in extra: vowel endings, "a R" -> [a Sil]. Breaths, a rolled r, the breath after a vowel,
+# a laugh ... are custom extras: you map their aliases to phonemes of your own (--custom-extra, or the GUI's
+# Custom extras window), and an alias that starts with a vowel ("a R", "a R息") keeps its transition.
 EXTRA_FOLDER = re.compile(r'extra|エクストラ|おまけ|息|吸|breath|ブレス', re.I)
 
 TYPICAL_DUR = {}
@@ -33,30 +30,26 @@ for _s, _d in ((UNV_PLOSIVE, .07), (UNV_FRIC, .10), (UNV_AFFR, .10), (V_PLOSIVE,
 TYPICAL_DUR['h'] = .08
 TYPICAL_DUR['N\\'] = .12
 
-# choosable extras: standalone breaths br1..br5, breath out/in, rolled r, vowel endings ([V Sil] from "a R")
-EXTRA_CHOICES = ['br1', 'br2', 'br3', 'br4', 'br5', 'brE', 'brI', 'rr', 'vend']
+EXTRA_CHOICES = ['vend']
+# built in up to 1.0.5: now custom extras. --extras with one of these says how to map it instead.
+REMOVED_EXTRAS = {'br1': '息1=br1:Breaths', 'br2': '息2=br2:Breaths', 'br3': '息3=br3:Breaths',
+                  'br4': '息4=br4:Breaths', 'br5': '息5=br5:Breaths', 'br': '息1=br1:Breaths',
+                  'brE': 'a R息=brE:Breaths:end', 'brI': 'a R吸=brI:Breaths', 'rr': '巻=rr:Liquids',
+                  'hh': 'a R=hh:Breaths:end'}
 
 
 def extra_kind(phs):
-    """Which choosable extra a mapped extra sequence is: 'br1'..'br5', 'brE', 'brI', 'rr' or 'vend'."""
-    for p in phs:
-        if p in BREATHS:
-            return p
-        if p in TRILL:
-            return 'rr'
+    """Which built-in extra a mapped extra sequence is (only vowel endings are built in)."""
     return 'vend'
 
 
 def parse_extras_want(spec):
-    """'br1,brE,rr,vend' (or 'br' for br1..br5, 'all', 'none') -> set of EXTRA_CHOICES. None = all."""
+    """'vend', 'all' or 'none' -> set of EXTRA_CHOICES. None = all."""
     if spec is None or spec is True:
         return None
     if spec is False:
         return set()
-    if isinstance(spec, (set, list, tuple)):
-        toks = list(spec)
-    else:
-        toks = re.split(r'[,;\s]+', str(spec).strip())
+    toks = list(spec) if isinstance(spec, (set, list, tuple)) else re.split(r'[,;\s]+', str(spec).strip())
     out = set()
     for t in toks:
         t = t.strip()
@@ -67,12 +60,11 @@ def parse_extras_want(spec):
             return None
         if tl in ('none', 'off', 'no'):
             return set()
-        if tl == 'br':
-            out.update('br%d' % i for i in range(1, 6))
-        elif t in EXTRA_CHOICES:
-            out.add(t)
-        elif tl in EXTRA_CHOICES:
+        if tl in EXTRA_CHOICES:
             out.add(tl)
+        elif t in REMOVED_EXTRAS or tl in REMOVED_EXTRAS:
+            raise ValueError('%s is not built in any more: map it as a custom extra, e.g. --custom-extra "%s"'
+                             % (t, REMOVED_EXTRAS.get(t) or REMOVED_EXTRAS[tl]))
         else:
             raise ValueError("unknown extra %r (choose from %s)" % (t, ', '.join(EXTRA_CHOICES)))
     return out
@@ -81,8 +73,6 @@ def parse_extras_want(spec):
 def pclass(ph):
     if ph in SIL:
         return 'sil'
-    if ph in BREATHS:
-        return 'ufric'
     if ph in VOWELS:
         return 'vowel'
     if ph in UNV_PLOSIVE:
@@ -436,25 +426,16 @@ _EXTRA_V = {'a': 'a', 'i': 'i', 'u': 'M', 'e': 'e', 'o': 'o', 'n': 'N\\',
             'あ': 'a', 'い': 'i', 'う': 'M', 'え': 'e', 'お': 'o', 'ん': 'N\\'}
 
 
-def extra_alias(alias, extra_folder=False):
-    """UTAU extras -> phonemes, or None. "a R" vowel ending, "a R息" vowel + breath out, "a R吸" vowel,
-    pause, breath in, "息1" / "breath2" (or "b1" inside an extras folder) breaths, "巻" / "rr" rolled r."""
+def lead_vowel(alias):
+    """The vowel a Japanese alias like "a R", "a laugh", "お cough" starts with (its left side), or None."""
+    m = re.match(r'\s*([aiueonあいうえおん])\s+\S', alias)
+    return _EXTRA_V[m.group(1)] if m else None
+
+
+def extra_alias(alias):
+    """The built-in extra: a vowel ending "a R" -> [a Sil], or None."""
     a = alias.strip().replace('ｘ', 'x').replace('Ｘ', 'x')
     a = re.sub(r'^\*+\s*', '', a)
-    a = re.sub(r'^[xX](?=[぀-ヿ巻])', '', a)
-    m = re.fullmatch(r'([aiueonあいうえおん])\s*R\s*(息|吸)?\s*[↑↓]?\d*', a)
-    if m:
-        v = _EXTRA_V[m.group(1)]
-        if m.group(2) == '息':
-            return [v, 'brE', 'Sil']
-        if m.group(2) == '吸':
-            return [v, 'Sil', 'brI', 'Sil']
-        return [v, 'Sil']
-    m = re.fullmatch(r'(?:-\s*)?(?:息|ブレス|breath|br)\s*([1-5])?', a, re.I)
-    if m is None and extra_folder:
-        m = re.fullmatch(r'b([1-5])', a)
-    if m:
-        return ['Sil', 'br%s' % (m.group(1) or '1'), 'Sil']
-    if re.fullmatch(r'(?:-\s*)?(?:x?巻(?:き舌)?|rr+|trill)', a, re.I):
-        return ['Sil', 'rr', 'Sil']
-    return None
+    a = re.sub(r'^[xX](?=[぀-ヿ])', '', a)
+    m = re.fullmatch(r'([aiueonあいうえおん])\s*R\s*[↑↓]?\d*', a)
+    return [_EXTRA_V[m.group(1)], 'Sil'] if m else None

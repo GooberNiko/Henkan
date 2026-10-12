@@ -150,8 +150,22 @@ def normalize_evec_mode(spec):
     raise ValueError("EVEC mode should be 'full' or 'vowels': %r" % (spec,))
 
 
+END_TOKENS = {'end', 'ending', 'phrase-end'}
+
+
+class CustomExtras(dict):
+    """{alias: (PHONEME, voiced, group)}; .ends = the phonemes that only end a phrase (never lead into a
+    vowel, so no [PH V] joins are made for them)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.ends = set()
+
+
 def parse_custom_extras(spec):
-    """'cough=ch:UnvoicedPlosives, laugh=la:voiced:Laughs' -> {alias: (PHONEME, voiced, group)}.
+    """'cough=ch:UnvoicedPlosives, a R=hh:Breaths:end' -> {alias: (PHONEME, voiced, group)}.
+
+    A trailing ':end' marks a phoneme that only ends a phrase (a breath out): it gets no joins into vowels.
 
     The type slot takes a DBTool phonetic unit group (Vowels, Semivowels, Nasals,
     UnvoicedFricatives, VoicedFricatives, Whisper, VoicedAffricates,
@@ -165,8 +179,9 @@ def parse_custom_extras(spec):
     Repeatable on the CLI (--custom-extra ... --custom-extra ...); entries are
     ';' or newline separated inside one string. None/'' = no customs.
     """
+    out = CustomExtras()
     if spec is None:
-        return {}
+        return out
     if isinstance(spec, dict):
         items = list(spec.items())
     elif isinstance(spec, (list, tuple)):
@@ -175,7 +190,6 @@ def parse_custom_extras(spec):
             items.extend(_split_custom_parts(part))
     else:
         items = _split_custom_parts(spec)
-    out = {}
     for item in items:
         if isinstance(item, tuple):
             alias, rest = item
@@ -195,7 +209,9 @@ def parse_custom_extras(spec):
         voiced, group, explicit = None, 'Custom', False
         for tok in bits[1:]:
             tl = tok.lower()
-            if tl in VOICED_TOKENS:
+            if tl in END_TOKENS:
+                out.ends.add(ph)
+            elif tl in VOICED_TOKENS:
                 voiced, explicit = True, True
             elif tl in UNVOICED_TOKENS:
                 voiced, explicit = False, True
@@ -244,8 +260,7 @@ def find_unmapped(bank_root, lang='ja'):
         if key in seen:
             continue
         seen.add(key)
-        ex = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''),
-                           bool(P.EXTRA_FOLDER.search(e.group)))
+        ex = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''))
         if ex is None and P.alias_to_phonemes(e.alias, lang) is None:
             out.append((e.raw_alias, e.group))
     return out
@@ -267,17 +282,53 @@ def all_aliases(bank_root, lang='ja'):
         if key in seen:
             continue
         seen.add(key)
-        ex = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''),
-                           bool(P.EXTRA_FOLDER.search(e.group)))
+        ex = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''))
         ph = P.alias_to_phonemes(e.alias, lang)
         if ex is not None:
-            maps_to = 'extra: %s' % P.extra_kind(ex)
+            maps_to = 'vowel ending -> %s' % ' '.join(ex)
         elif ph is not None:
             maps_to = ' -> %s' % ' '.join(ph)
         else:
             maps_to = None
         out.append((e.raw_alias, e.group, maps_to))
     return out
+
+
+def alias_rows(bank_root, lang='ja'):
+    """What the Custom extras window lists: one dict per alias a custom extra can name.
+
+    key       how the custom extra is written (unknown aliases and vowel endings merge across pitches,
+              aliases that already sing something stay one per recording)
+    count     recordings it covers, groups: the folders they are in
+    maps_to   what it is now: 'unknown', 'vowel ending [a Sil]' or its phonemes
+    lead      the vowel it starts with ("a R" -> 'a'): a custom extra on it keeps that transition
+    kind      'unknown', 'ending' or 'sung' (the window sorts and filters by it)"""
+    from . import oto, phonemes as P
+    entries = oto.read_bank(bank_root)
+    if lang == 'auto':
+        lang = P.detect_language([e.alias for e in entries])
+    rows = {}
+    for e in entries:
+        own = P.alias_to_phonemes(e.alias, lang)
+        vend = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''))
+        ending = vend is not None or (own is not None and len(own) == 2 and own[1] == 'Sil'
+                                      and own[0] in P.SUSTAINED)
+        numbered = e.alias + (str(e.dup) if e.dup else '')          # "breath1", "breath2" stay apart
+        key = numbered if (own is None or ending) else e.raw_alias.strip()
+        r = rows.get(key)
+        if r is None:
+            ex, ph = P.extra_alias(key), P.alias_to_phonemes(key, lang)
+            if ex is None and ph is not None and len(ph) == 2 and ph[1] == 'Sil' and ph[0] in P.SUSTAINED:
+                ex = ph
+            kind = 'ending' if ex is not None else 'sung' if (ph is not None or own is not None) else 'unknown'
+            maps = ('vowel ending [%s]' % ' '.join(ex) if ex is not None else
+                    ' '.join(ph or own) if kind == 'sung' else 'unknown')
+            r = rows[key] = {'key': key, 'count': 0, 'groups': set(), 'maps_to': maps, 'kind': kind,
+                             'lead': P.lead_vowel(key) if lang == 'ja' else None}
+        r['count'] += 1
+        r['groups'].add(e.group)
+    order = {'unknown': 0, 'ending': 1, 'sung': 2}
+    return sorted(rows.values(), key=lambda r: (order[r['kind']], r['key']))
 
 
 def auto_evec_map(rows):

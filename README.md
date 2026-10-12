@@ -25,7 +25,7 @@ click "Add Articulations" 790 times with your own human finger.
 > phonetic dictionaries). We do not have it, we will not send it, please do not ask the README.
 
 **Jump to:** [Quick start](#-quick-start-the-i-just-want-it-to-sing-path) ·
-[The window](#%EF%B8%8F-the-window) · [Extras](#%EF%B8%8F-extras-breaths-rolled-r-end-breaths) ·
+[The window](#%EF%B8%8F-the-window) · [Extras](#%EF%B8%8F-extras--transitions-breaths-rolled-r-end-breaths-anything) ·
 [ヴ](#🅥-ヴ-gets-a-real-v-v-and-v) · [Voice colours](#-voice-colours-evec) ·
 [Pack & Install](#-pack--install-tab-3-your-bank-in-a-real-editor) ·
 [V3→V2](#-v3v2-backport-tab-4-your-v3v4-banks-in-vocaloid2) ·
@@ -54,7 +54,7 @@ Four tabs, in the order you use them:
 
 | Tab | What it's for |
 |---|---|
-| **① Convert** | Pick folders, then convert. The options fold into sections (**Processing**, **Extras**, **Voice colours**, **Fine-tuning**); a closed section still says what it's set to, so nothing hides from you |
+| **① Convert** | Pick folders, then convert. The options fold into sections (**Processing**, **Extras & transitions**, **Voice colours**, **Fine-tuning**); a closed section still says what it's set to, so nothing hides from you |
 | **② Build singer DB** | Drives the DBTool, hidden in the background. When it's done, the Pack tab already points at the new DB |
 | **③ Pack & Install** | `.ddb` + `.ddi` + `.vvd`, a CompID, and an install into any VOCALOID editor on the PC |
 | **④ V3 → V2 backport** | V3/V4 banks rewritten so VOCALOID2 can sing them |
@@ -81,41 +81,48 @@ rescans the bank, and the window remembers its size, tab and settings.
 
 The DBTool's file formats were worked out from the DBTool itself — nerd details in [FORMATS.md](FORMATS.md).
 
-## 🌬️ Extras (breaths, rolled r, end breaths)
+## 🌬️ Extras & transitions (breaths, rolled r, end breaths, anything)
 
-If your bank has bonus samples, they become phonemes you can type in the editor:
+Built in there's one: **vowel endings**. `a R`, `i R`… become the `[a Sil]` you sing at the end of a phrase
+(the **Vowel endings** box; `--extras none` turns it off).
 
-| Type this | What it is | Made from (UTAU alias) |
+Everything else your bank recorded on the side (breaths, a rolled r, a laugh, a cough, a growl) is a
+**custom extra**: you pick which aliases become which phoneme, and what you name it is what you type in
+the editor. Open **Custom extras → Edit…** on the Convert tab:
+
+- Tick the sounds you want, give each a phoneme name and a dictionary group (Breaths, or the DBTool's own
+  twelve: Vowels, Semivowels, Nasals, UnvoicedFricatives, VoicedFricatives, Whisper, VoicedAffricates,
+  UnvoicedAffricates, Liquids, UnvoicedPlosives, VoicedPlosives, Silence). The search box filters as you
+  type; **Show every alias** also lists the ones that already sing.
+- An alias that **starts with a vowel** keeps the transition it was recorded with. `a R` → `hh` gives
+  the real `[a hh]` from that recording, then `[hh Sil]`.
+- **Several aliases can share one phoneme.** Tick `a R`, `i R`, `e R`… (or a CVVC bank's `a -`, `i -`…),
+  call them all `hh`, and every vowel gets its own recorded way in. The vowel endings themselves stay too.
+- The **Transitions** panel shows, per phoneme, which joins come from recordings (`a→hh ✔ 4`) and which
+  get spliced (`M→hh ~ splice`), so you can see what's missing before converting.
+- **leads into singing** (on by default for lone sounds): also make `[hh a]`, `[hh i]`… (spliced) and, for
+  unvoiced sounds, breath-into-consonant joins like `[br1 s]`. Off = it only ends a phrase, like a breath out.
+
+Typical mappings:
+
+| Type this | What it is | Map it from |
 |---|---|---|
-| `br1` … `br5` | a breath, on its own note | `息1`, `breath2`, or `b1`… in an extras folder |
-| `brE` | breath **out** at the end of a phrase | `a R息`, `i R息`… (each vowel its own) |
-| `brI` | breath **in** | `a R吸`… |
-| `rr` | rolled r (yes, really) | `巻`, `rr` |
-| *(nothing to type)* | natural vowel endings `[a Sil]` | `a R`, `i R`… |
+| `br1` … `br5` | a breath, on its own note | `息1`, `breath2`, `b1`… |
+| `brE` | breath **out** at the end of a phrase | `a R息`, `i R息`… (phrase end) |
+| `hh` | the breath after a vowel ending | `a R`, `i R`… or `a -`, `i -`… (phrase end) |
+| `rr` | rolled r | `巻`, `rr` |
 
-Joins the bank never recorded are spliced, so a breath can go right before or after any sung note
-(`br1` then `sa`, `a` then `brE`, `rr a`). Extras are picked up from their bonus folder even if you only
-selected the singing folders. Every `report.txt` lists which extra came from which sample.
-Don't want them all? Tick just the ones you want in the GUI's **Extras** section (br1…br5, brE, brI, rr, vend),
-or `--extras br1,brE,rr` on the command line (`all`, `none`, `br` for br1..br5; `--no-extras` still works).
+Command line: `--custom-extra "ALIAS=PHONEME:GROUP[:end]"`, repeatable or `;`-separated, e.g.
+`--custom-extra "a R=hh:Breaths:end; i R=hh:Breaths:end; 息1=br1:Breaths; cough=ch:UnvoicedPlosives"`.
+`:end` = phrase end. `--list-unknown` lists every alias that maps to nothing.
+Every `report.txt` lists each custom phoneme, the aliases its recorded units came from, and its units.
 
-**Custom extras: ANY sound in ANY bank can be ported.** Got a `cough`, a laugh, a growl? Point at it:
-`--custom-extra cough=ch:UnvoicedPlosives` (repeatable), or the GUI's **Custom extras → Pick…**
-button: it lists every unmapped alias with a tick box, a prefilled phoneme name and a phonetic
-group dropdown — no typing needed. The popup scrolls (mouse wheel included), has a **search bar**
-that filters as you type, remembers your ticks, and romanizes kana when prefilling names (`xか` → `ka`).
-You pick the phoneme name **and its dictionary group** (the DBTool's own twelve: Vowels,
-Semivowels, Nasals, UnvoicedFricatives, VoicedFricatives, Whisper, VoicedAffricates,
-UnvoicedAffricates, Liquids, UnvoicedPlosives, VoicedPlosives, Silence — plain
-voiced/unvoiced also works), it is cut like a breath (`Sil ch Sil`), added to
-`dictionary.txt` in that group, joined to vowels both ways, and listed in `report.txt`.
-**Pick…** in the GUI (or `--list-unknown` on the CLI) shows every bank alias that currently maps to
-nothing — those are your custom-extra candidates.
+An alias is matched as written, so `a R` never takes a CVVC bank's `a r` (the a→r join). Extras are picked
+up from their bonus folder even if you only selected the singing folders.
 
 Already handled without custom extras: `* あ` spare takes, `xか`/`Ｘか` extra takes, small-kana
 offglides (`てぅ` → `t e u`, `おぁ` → `o a`, `どぉ` → `d o`), sokuon endings (`e てっ` →
-`e t e ?` glottal stop), edge-bank `'` tags (`く'` → `k u`), `V R息` breath endings, and
-`息1`/`b1`/`巻` breaths — the Kasane Teto OU bank (6,216 entries) maps every alias with zero unknowns.
+`e t e ?` glottal stop) and edge-bank `'` tags (`く'` → `k u`).
 
 ## 🅥 ヴ gets a real v (`v` and `v'`)
 
@@ -271,12 +278,12 @@ Useful `convert` options:
 | `--colors main\|evec\|merge` | voice colours, see above |
 | `--avoid "C V"` | don't use this unit's recording; rebuild it from others (for the one unit that's cursed) |
 | `--brighten PH=DB` | lift the treble of a dull vowel, e.g. `--brighten o=3` |
-| `--extras LIST` | which extras to convert: br1..br5, brE, brI, rr, vend (`all`, `none`, `br`) |
+| `--extras vend\|none` | vowel endings `a R` → `[a Sil]` (default on) |
 | `--no-extras` | same as `--extras none` |
 | `--evec-map "C=#N,..."` | choose EVEC colours/numbers: `Soft=#1,Whisper=#2,Power=main,Old=skip` |
 | `--evec-phonemes "C:ph,..."` | choose phonemes per colour: `Soft:a,i,M,e,o;Whisper:a,e` (warns, not stops, without vowels) |
 | `--evec-mode full\|vowels` | `vowels` = EVEC support mode: only vowels get `#numbers` |
-| `--custom-extra "ALIAS=PH:TYPE"` | custom extra, repeatable: `cough=ch:UnvoicedPlosives`, `laugh=la:Vowels` |
+| `--custom-extra "ALIAS=PH:GROUP[:end]"` | custom extra, repeatable: `cough=ch:UnvoicedPlosives`, `a R=hh:Breaths:end` (see Extras & transitions) |
 | `--list-unknown` | list aliases mapping to nothing (custom-extra candidates) and exit |
 | `--v-mode auto\|v\|b` | ヴ as its own `v` / `v'` (`auto`: when the bank recorded it) or as `b` / `b'` |
 | `--no-splice` | don't fake missing transitions |
@@ -296,7 +303,7 @@ next to it as `<folder>__orig`.
 | tool | what it does |
 |---|---|
 | `tools/cycle.py <bank> <tag> [options]` | convert → build → mount → render → check, in one go |
-| `tools/render.py <voice no> <out.wav>` | writes a test song (all syllables, legato, long notes, every ん; `--song en` / `--song extras` for English and breaths) and renders it in the dev editor, plus the `.msd` analysis |
+| `tools/render.py <voice no> <out.wav>` | writes a test song (all syllables, legato, long notes, every ん; `--song en` / `--song extras` for English and breaths: map them as br1…br5, brE, brI, rr) and renders it in the dev editor, plus the `.msd` analysis |
 | `tools/render_qa.py <song.wav>` | finds doubled plosive bursts, level/timbre jumps where units meet, clicks |
 | `tools/msd.py <song.msd>` | prints which unit VOCALOID used when (held notes show up as `[o o]`) |
 | `tools/qa.py <converted folder>` | checks a converted folder before building: loop length/seams, dips, cut points, loudness |

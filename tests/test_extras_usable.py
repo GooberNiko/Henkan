@@ -1,8 +1,7 @@
-"""Selected extras are usable: they reach dictionary.txt, manifest, .trans and validate OK.
+"""Custom extras are usable: they reach dictionary.txt, manifest, .trans and validate OK.
 
-Builds a tiny synthetic bank (sine vowels + noise breath + rr), converts with
-extras='br1' vs extras='br1,rr', and checks the outputs. Custom names ('cough',
-'br6') are rejected by the picker and unmapped aliases stay skipped.
+Builds a tiny synthetic bank (sine vowels + noise breath + rr), maps the breath (and the rr) as custom
+extras, and checks the outputs. --extras only knows vowel endings now.
 
     python -I -m unittest discover -s tests -v
 """
@@ -54,7 +53,7 @@ def make_bank(root, nmains=22):
 
 def convert_bank(bank, dpath, out, spec):
     conv = convert.Converter(bank, out, lang='ja', dict_path=dpath, colors='main',
-                             extras=spec, log=QUIET)
+                             custom_extras=spec, log=QUIET)
     return conv, conv.run()
 
 
@@ -63,7 +62,7 @@ class ExtrasUsable(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             bank, dpath = make_bank(root)
             out = os.path.join(root, 'out')
-            conv, manifest = convert_bank(bank, dpath, out, 'br1')
+            conv, manifest = convert_bank(bank, dpath, out, 'breath1=br1:Breaths')
             self.assertEqual(conv.extras_found, ['br1'])
             d = dbtool_io.load_dictionary(os.path.join(out, 'dictionary.txt'))
             self.assertIn('br1', d)
@@ -82,10 +81,11 @@ class ExtrasUsable(unittest.TestCase):
     def test_selection_filters(self):
         with tempfile.TemporaryDirectory() as root:
             bank, dpath = make_bank(root)
-            _, manifest = convert_bank(bank, dpath, os.path.join(root, 'out'), 'br1,rr')
+            _, manifest = convert_bank(bank, dpath, os.path.join(root, 'out'),
+                                       'breath1=br1:Breaths; rr=rr:Liquids')
             units = {r[2] for r in manifest if r[1] == 'art'}
             self.assertIn('Sil rr', units)
-            _, manifest2 = convert_bank(bank, dpath, os.path.join(root, 'out2'), 'br1')
+            _, manifest2 = convert_bank(bank, dpath, os.path.join(root, 'out2'), 'breath1=br1:Breaths')
             units2 = {r[2] for r in manifest2 if r[1] == 'art'}
             self.assertFalse(any('rr' in u.split() for u in units2), sorted(units2))
 
@@ -95,7 +95,7 @@ class ExtrasUsable(unittest.TestCase):
         with self.assertRaises(ValueError):
             P.parse_extras_want('br6')
         self.assertIsNone(P.extra_alias('cough'))
-        self.assertIsNone(P.extra_alias('laugh', extra_folder=True))
+        self.assertIsNone(P.extra_alias('breath1'))
 
 
 if __name__ == '__main__':

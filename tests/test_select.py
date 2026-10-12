@@ -56,15 +56,13 @@ class Parse(unittest.TestCase):
     def test_extras_want(self):
         self.assertIsNone(P.parse_extras_want('all'))
         self.assertEqual(P.parse_extras_want('none'), set())
-        self.assertEqual(P.parse_extras_want('br1,brE,rr,vend'), {'br1', 'brE', 'rr', 'vend'})
-        self.assertEqual(len(P.parse_extras_want('br')), 5)
+        self.assertEqual(P.parse_extras_want('vend'), {'vend'})
         with self.assertRaises(ValueError):
             P.parse_extras_want('br9')
+        with self.assertRaises(ValueError):          # built in up to 1.0.5: says how to map it now
+            P.parse_extras_want('br1,vend')
 
     def test_extra_kind(self):
-        self.assertEqual(P.extra_kind(['Sil', 'br1', 'Sil']), 'br1')
-        self.assertEqual(P.extra_kind(['a', 'brE', 'Sil']), 'brE')
-        self.assertEqual(P.extra_kind(['Sil', 'rr', 'Sil']), 'rr')
         self.assertEqual(P.extra_kind(['a', 'Sil']), 'vend')
 
     def test_custom_extras(self):
@@ -197,13 +195,13 @@ class TetoBank(unittest.TestCase):
     offglides, sokuon endings, edge diphthongs) must map, not flood the popup."""
     def test_star_prefix(self):
         self.assertEqual(P.ja_alias('* あ'), ['a'])
-        self.assertEqual(P.extra_alias('* 巻'), ['Sil', 'rr', 'Sil'])
+        self.assertEqual(P.extra_alias('* a R'), ['a', 'Sil'])
 
     def test_extra_takes(self):
         self.assertEqual(P.ja_alias('xか'), ['k', 'a'])
         self.assertEqual(P.ja_alias('Ｘか'), ['k', 'a'])
-        self.assertEqual(P.extra_alias('Ｘ巻', True), ['Sil', 'rr', 'Sil'])
-        self.assertEqual(P.extra_alias('x巻', True), ['Sil', 'rr', 'Sil'])
+        self.assertEqual(P.extra_alias('xあ R'), ['a', 'Sil'])
+        self.assertIsNone(P.extra_alias('Ｘ巻'))           # a rolled r is a custom extra now
 
     def test_small_kana_offglides(self):
         self.assertEqual(P.ja_syllable('teu'), ['t', 'e', 'M'])  # う is devkit phoneme M
@@ -239,8 +237,7 @@ class TetoBank(unittest.TestCase):
             os.makedirs(d)
             with open(os.path.join(d, 'oto.ini'), 'w', encoding='utf-8') as f:
                 for wav, alias in [('_a.wav', '* あ'), ('_xka.wav', 'xか'),
-                                   ('_ete.wav', 'e てっ'), ('_aoa.wav', 'a おぁ'),
-                                   ('_maki.wav', 'Ｘ巻')]:
+                                   ('_ete.wav', 'e てっ'), ('_aoa.wav', 'a おぁ')]:
                     f.write('%s=%s,100,50,-200,30,10\n' % (wav, alias))
                     open(os.path.join(d, wav), 'wb').close()
             self.assertEqual(Sel.find_unmapped(root, 'ja'), [])
@@ -252,10 +249,9 @@ class TetoBank(unittest.TestCase):
             make_bank(root)
             got = Sel.all_aliases(root, 'ja')
             by = {(raw, grp): note for raw, grp, note in got}
-            self.assertEqual(by[('breath1', 'extras')], 'extra: br1')
-            self.assertEqual(by[('rr', 'extras')], 'extra: rr')
+            self.assertIsNone(by[('breath1', 'extras')])    # breaths are custom extras now
+            self.assertIsNone(by[('rr', 'extras')])
             self.assertEqual(by[('ka', 'Standard')], ' -> k a')
-            self.assertTrue(all(note is not None for note in by.values()), by)
         with tempfile.TemporaryDirectory() as root:
             d = os.path.join(root, 'bank')
             os.makedirs(d)
@@ -270,10 +266,28 @@ class Extras(unittest.TestCase):
     def test_extra_selection(self):
         with tempfile.TemporaryDirectory() as root:
             make_bank(root)
-            conv = make_conv(root, colors='evec', extras='br1')
+            with self.assertRaises(ValueError):
+                make_conv(root, colors='evec', extras='br1')
+            conv = make_conv(root, colors='evec', custom_extras='breath1=br1:Breaths')
             by = {e.raw_alias: e for e in conv.entries}
             self.assertEqual(conv._extra(by['breath1']), ['Sil', 'br1', 'Sil'])
             self.assertIsNone(conv._extra(by['rr']))
+
+    def test_alias_rows(self):
+        with tempfile.TemporaryDirectory() as root:
+            make_bank(root)
+            d = os.path.join(root, 'Standard')
+            with open(os.path.join(d, 'oto.ini'), 'a', encoding='utf-8') as f:
+                f.write('c.wav=a R,100,50,-200,30,10\n')
+            open(os.path.join(d, 'c.wav'), 'wb').close()
+            rows = {r['key']: r for r in Sel.alias_rows(root, 'ja')}
+            self.assertEqual(rows['breath1']['kind'], 'unknown')     # numbered takes stay apart
+            self.assertEqual(rows['a R']['kind'], 'ending')
+            self.assertEqual(rows['a R']['lead'], 'a')
+            self.assertEqual(rows['ka']['kind'], 'sung')
+            self.assertEqual(rows['ka']['count'], 2)               # same raw alias in two folders
+            self.assertEqual(rows['ka']['groups'], {'Soft', 'Standard'})
+            self.assertEqual([r['kind'] for r in Sel.alias_rows(root, 'ja')][0], 'unknown')
 
     def test_extras_none(self):
         with tempfile.TemporaryDirectory() as root:

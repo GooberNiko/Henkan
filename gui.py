@@ -24,10 +24,9 @@ SETTINGS = os.path.join(_APPDATA, 'Henkan', 'gui.json')
 OLD_SETTINGS = os.path.join(_APPDATA, 'utau2vocaloid', 'gui.json')     # read once if SETTINGS isn't there yet
 sys.path.insert(0, ROOT)
 
-from u2v.phonemes import EXTRA_CHOICES as EXTRA_KEYS  # noqa: E402
 
 SAVED = ('bank', 'out', 'dict', 'lang', 'colors', 'keep', 'splice', 'fill', 'normalize', 'derive', 'extend_dict',
-         'extras', 'extras_list', 'evec_map', 'evec_phonemes', 'custom_extras', 'evec_vowels', 'v_mode',
+         'extras', 'evec_map', 'evec_phonemes', 'custom_extras', 'evec_vowels', 'v_mode',
          'merge_groups', 'brighten', 'avoid', 'db_name', 'db_path', 'db_lang', 'dbtool', 'dbtool_hidden',
          'pkg_db', 'pkg_name', 'pkg_compid', 'pkg_out', 'pkg_editor', 'pkg_dest', 'pkg_devini',
          'v3v2_name', 'v3v2_lang', 'sections', 'geometry', 'tab')
@@ -199,7 +198,7 @@ class App(tk.Tk):
         self.v.update(bank=S(), out=S(), dict=S(), lang=S(value='auto'), colors=S(value='main'), keep=I(value=1),
                       splice=B(value=True), fill=B(value=True), normalize=B(value=True), derive=B(value=True),
                       extend_dict=B(value=True), merge_groups=B(value=False), extras=B(value=True),
-                      brighten=S(), avoid=S(), extras_list=S(value='all'), evec_map=S(), evec_phonemes=S(),
+                      brighten=S(), avoid=S(), evec_map=S(), evec_phonemes=S(),
                       custom_extras=S(), evec_vowels=B(value=False), v_mode=S(value=V_MODE_LABELS[0]),
                       sections=S(value='extras'), geometry=S(), tab=S(value='0'),
                       db_name=S(), db_path=S(), db_lang=S(value='Japanese'),
@@ -207,8 +206,6 @@ class App(tk.Tk):
                       pkg_dest=S(), pkg_devini=B(value=False),
                       v3v2_src=S(), v3v2_name=S(), v3v2_lang=S(value='Auto'),
                       dbtool=S(value=os.path.join(DEVKIT, 'VocaloidDBTool3.exe')), dbtool_hidden=B(value=True))
-        for _k in EXTRA_KEYS:
-            self.v['ex_' + _k] = B(value=True)
         self.status = S(value='Ready')
         self.info = S(value='Choose an UTAU voicebank folder.')
         self.evec_info = S(value='')
@@ -230,15 +227,6 @@ class App(tk.Tk):
             break
         if self.v['v_mode'].get().split()[0] not in ('auto', 'v', 'b'):
             self.v['v_mode'].set(V_MODE_LABELS[0])
-        sel = self.v['extras_list'].get()
-        if not self.v['extras'].get() or sel == 'none':
-            want = set()
-        elif sel in ('all', ''):
-            want = set(EXTRA_KEYS)
-        else:
-            want = {t.strip() for t in sel.split(',')}
-        for _k in EXTRA_KEYS:
-            self.v['ex_' + _k].set(_k in want)
 
     def _save(self):
         try:
@@ -268,6 +256,8 @@ class App(tk.Tk):
         style.configure('Sec.TLabel', font=(UI_FONT_BOLD, 10), foreground=INK)
         style.configure('Hint.TLabel', foreground=HINT)
         style.configure('Info.TLabel', foreground=INFO)
+        style.configure('Rec.TLabel', foreground='#15803d')
+        style.configure('Splice.TLabel', foreground='#b45309')
         style.configure('Accent.TButton', font=(UI_FONT_BOLD, 9), padding=(16, 5))
         style.configure('Big.TButton', padding=(12, 4))
         style.configure('TNotebook.Tab', padding=(12, 4))
@@ -426,24 +416,15 @@ class App(tk.Tk):
             ttk.Checkbutton(s, text=t, variable=self.v[k]).grid(row=i // 2, column=i % 2, sticky='w',
                                                                 padx=(0, 24), pady=1)
 
-        s = self._section(r, 3, 'extras', 'Extras').body
+        s = self._section(r, 3, 'extras', 'Extras & transitions').body
         s.columnconfigure(1, weight=1)
-        ttk.Checkbutton(s, text="Convert the bank's extras (breaths, rolled r, vowel endings)",
-                        variable=self.v['extras'], command=self._sync_extras_master).grid(
+        ttk.Checkbutton(s, text='Vowel endings  ("a R" → [a Sil])', variable=self.v['extras']).grid(
             row=0, column=0, columnspan=3, sticky='w')
-        chips = ttk.Frame(s)
-        chips.grid(row=1, column=0, columnspan=3, sticky='w', pady=(2, 0))
-        self.extra_chips = []
-        for _k in EXTRA_KEYS:
-            cb = ttk.Checkbutton(chips, text=_k, variable=self.v['ex_' + _k], command=self._sync_extras)
-            cb.pack(side='left', padx=(0, 8))
-            self.extra_chips.append(cb)
-        self._hint(s, 2, 'br1..br5 breaths · brE breath out · brI breath in · rr rolled r · '
-                         'vend vowel endings (a R)', column=0, columnspan=3)
-        self._row(s, 3, 'Custom extras', self.v['custom_extras'], self._pick_custom, width=30,
-                  browse_text='Pick…')
-        self._hint(s, 4, 'Any alias becomes its own phoneme: cough=ch:UnvoicedPlosives; laugh=la:Vowels\n'
-                         '(Pick… lists the sounds that map to nothing and fills this in)')
+        self._row(s, 1, 'Custom extras', self.v['custom_extras'], self._edit_custom, width=30,
+                  browse_text='Edit…')
+        self._hint(s, 2, 'Any sound in the bank as a phoneme of your own: breaths, a rolled r, a laugh …\n'
+                         'An alias that starts with a vowel keeps its recorded transition, so a R, i R … → hh\n'
+                         'gives every vowel its own way in. Edit… shows which transitions are recorded.')
 
         s = self._section(r, 4, 'colours', 'Voice colours (EVEC)').body
         s.columnconfigure(1, weight=1)
@@ -477,10 +458,8 @@ class App(tk.Tk):
                                                                                        'report.txt'))).pack(side='left')
         ttk.Button(b, text='Open folder', command=lambda: self.open_file(self.v['out'].get())).pack(side='left', padx=6)
 
-        for k in ('splice', 'fill', 'normalize', 'derive', 'extend_dict', 'merge_groups', 'extras', 'extras_list',
-                  'custom_extras', 'evec_map', 'evec_vowels', 'evec_phonemes', 'colors', 'brighten', 'avoid'):
+        for k in ('splice', 'fill', 'normalize', 'derive', 'extend_dict', 'merge_groups', 'extras', 'custom_extras', 'evec_map', 'evec_vowels', 'evec_phonemes', 'colors', 'brighten', 'avoid'):
             self.v[k].trace_add('write', lambda *_a: self._summaries())
-        self._sync_extras()
         self._summaries()
         return f
 
@@ -497,11 +476,13 @@ class App(tk.Tk):
         if v['merge_groups'].get():
             bits.append('folders merged')
         self.sections['processing'].summary.set(' · '.join(bits))
-        on = [k for k in EXTRA_KEYS if v['ex_' + k].get()] if v['extras'].get() else []
-        n_custom = len([p for p in re.split(r'[;\n]+', v['custom_extras'].get()) if p.strip()])
-        ex = ('all %d' % len(EXTRA_KEYS) if len(on) == len(EXTRA_KEYS) else
-              ', '.join(on) if on else 'built-in off')
-        self.sections['extras'].summary.set(ex + (' · %d custom' % n_custom if n_custom else ''))
+        try:
+            from u2v import select as _SelS
+            phs = sorted({ph for ph, _v, _g in _SelS.parse_custom_extras(v['custom_extras'].get()).values()})
+        except ValueError:
+            phs = ['?']
+        self.sections['extras'].summary.set('vowel endings %s · %s' % (
+            'on' if v['extras'].get() else 'off', ', '.join(phs) if phs else 'no custom extras'))
         n_col = len(getattr(self, 'color_rows', []) or [])
         col = '%s' % v['colors'].get()
         if v['evec_vowels'].get():
@@ -1001,26 +982,6 @@ class App(tk.Tk):
             self.evec_info.set('')
 
     # ---------------------------------------------------------------- actions
-    def _sync_extras(self):
-        """A chip changed: the master box is on while any chip is."""
-        on = [_k for _k in EXTRA_KEYS if self.v['ex_' + _k].get()]
-        self.v['extras_list'].set('all' if len(on) == len(EXTRA_KEYS) else ','.join(on) or 'none')
-        self.v['extras'].set(bool(on))
-        self._extra_chip_state()
-
-    def _sync_extras_master(self):
-        """The master box changed: off greys the chips out, on with no chip ticked ticks them all."""
-        if self.v['extras'].get() and not any(self.v['ex_' + _k].get() for _k in EXTRA_KEYS):
-            for _k in EXTRA_KEYS:
-                self.v['ex_' + _k].set(True)
-            self._sync_extras()
-        self._extra_chip_state()
-        self._summaries()
-
-    def _extra_chip_state(self):
-        for cb in getattr(self, 'extra_chips', ()):
-            cb.state(['!disabled'] if self.v['extras'].get() else ['disabled'])
-
     def _build_evec_rows(self, rows):
         """One label + number dropdown per colour. Preserves any previous picks."""
         if not hasattr(self, 'evec_box'):
@@ -1074,145 +1035,250 @@ class App(tk.Tk):
             self.v['colors'].set('evec')
         self.log('EVEC map: %s\n' % self.v['evec_map'].get())
 
-    def _pick_custom(self):
-        """Tick unknown aliases, pick voiced/unvoiced from a dropdown, OK. No typing."""
+    def _edit_custom(self):
+        """Custom extras & transitions: tick aliases, name their phoneme (several may share one), pick its
+        group, and see per phoneme which vowel transitions come from recordings and which get spliced."""
         bank = self.v['bank'].get()
         if not os.path.isdir(bank):
             return messagebox.showwarning('Custom extras', 'Choose a bank first.')
+        from u2v import phonemes as _P, select as _S
+        lang = 'en' if (self.v['lang'].get() == 'en' or self.detected_lang == 'en') else 'ja'
         try:
-            from u2v import select as _SelU
-            lang = 'en' if (self.v['lang'].get() == 'en' or self.detected_lang == 'en') else 'ja'
-            rows = _SelU.find_unmapped(bank, lang)
+            rows = _S.alias_rows(bank, lang)
+            cur = _S.parse_custom_extras(self.v['custom_extras'].get())
+        except ValueError as ex:
+            return messagebox.showwarning('Custom extras', 'The custom extras field: %s' % ex)
         except Exception as ex:                                    # noqa: BLE001 - show, don't crash
-            return messagebox.showwarning('Custom extras', 'Scan failed: %s' % ex)
-        forced = False
-        if not rows:
-            # everything maps: still open the picker over ALL sounds so any of them
-            # can be forced into its own phoneme (a laugh that maps to 'ra', ...)
-            everything = _SelU.all_aliases(bank, lang)
-            if not everything:
-                return messagebox.showinfo('Custom extras', 'No aliases found in this bank.')
-            forced = True
-            rows = [(raw, grp, maps_to) for raw, grp, maps_to in everything]
-        else:
-            rows = [(raw, grp, None) for raw, grp in rows]
-        SHOW = 200  # widgets per view; the search itself always scans every alias
-        cur = {}
-        try:
-            if self.v['custom_extras'].get().strip():
-                cur = _SelU.parse_custom_extras(self.v['custom_extras'].get())
-        except ValueError:
-            cur = {}
-        taken = {ph for _a, (ph, _v, _g) in cur.items()}
+            return messagebox.showwarning('Custom extras', 'Could not read the bank: %s' % ex)
+        known = {r['key'] for r in rows}
+        for alias in cur:                                          # keep entries this bank doesn't have
+            if alias not in known:
+                rows.append({'key': alias, 'count': 0, 'groups': set(), 'maps_to': 'not in this bank',
+                             'kind': 'unknown', 'lead': _P.lead_vowel(alias) if lang == 'ja' else None})
+        groups = ['Breaths'] + list(_S.PHONETIC_GROUPS)
+        sung = set().union(_P.VOWELS, _P.UNV_PLOSIVE, _P.UNV_FRIC, _P.UNV_AFFR, _P.V_PLOSIVE, _P.V_FRIC,
+                           _P.NASAL, _P.LIQUID, _P.SEMI, _P.SIL, _P.V_PHONEMES)
+        vowels = ['a', 'i', 'M', 'e', 'o', 'N\\'] if lang == 'ja' else []
+
+        # prefilled names: "a R", "i R" ... share one ("hh"), so ticking them all just works
+        # (vowel endings "a R" / "a -" all suggest hh; names already in the field win)
+        by_rest, taken = {'R': 'hh', '-': 'hh'}, {ph for ph, _v, _g in cur.values()} | sung | {'hh'}
+        for alias, (ph, _v, _g) in cur.items():
+            if lang == 'ja' and _P.lead_vowel(alias):
+                by_rest[alias.split(None, 1)[1].strip()] = ph
+
+        def suggest(r):
+            if r['lead']:
+                rest = r['key'].split(None, 1)[1].strip()
+                if rest not in by_rest:
+                    by_rest[rest] = _S.suggest_extra_phoneme(rest, taken)
+                    taken.add(by_rest[rest])
+                return by_rest[rest]
+            ph = _S.suggest_extra_phoneme(r['key'], taken)
+            taken.add(ph)
+            return ph
+
+        items = []
+        for r in rows:
+            ph0, v0, g0 = cur.get(r['key'], (None, None, None))
+            if ph0 is None:
+                ph0 = suggest(r)
+                breathy = ph0 == 'hh' or re.search(r'息|吸|breath|br', r['key'], re.I)
+                g0 = 'Breaths' if breathy else 'Whisper'
+            items.append(dict(r, inc=tk.BooleanVar(value=r['key'] in cur), ph=tk.StringVar(value=ph0),
+                              grp=tk.StringVar(value=g0 if g0 in groups else
+                                               ('Vowels' if v0 else 'Breaths'))))
+        ends = {ph: tk.BooleanVar(value=ph in cur.ends) for ph in {ph for ph, _v, _g in cur.values()}}
+        for it in items:
+            it['trans'] = tk.StringVar()
+            show = lambda *_a, x=it: x['trans'].set(  # noqa: E731
+                '%s → %s' % (x['lead'], x['ph'].get().strip() or '?') if x['lead'] else 'on its own')
+            it['ph'].trace_add('write', show)
+            show()
+
         top = tk.Toplevel(self)
-        top.title('Custom extras — tick, pick a type, OK')
+        top.title('Custom extras & transitions')
         top.transient(self)
         top.grab_set()
-        top.minsize(560, 400)
-        ttk.Label(top, text='Tick the sounds to port. Names are prefilled — no typing needed.'
-                  if not forced else
-                  'Everything already maps — tick any sound to force it into its own phoneme.',
-                  padding=(10, 8, 10, 0)).pack(anchor='w')
-        srow = ttk.Frame(top, padding=(10, 4, 10, 0))
-        srow.pack(fill='x')
-        ttk.Label(srow, text='Search:').pack(side='left')
+        top.geometry('980x720')
+        top.minsize(760, 520)
+        top.columnconfigure(0, weight=1)
+        top.rowconfigure(3, weight=1)
+        ttk.Label(top, padding=(12, 10, 12, 0), style='Info.TLabel', wraplength=940, justify='left',
+                  text='Tick the sounds to port and name their phoneme. An alias that starts with a vowel '
+                       '(a R, a laugh) keeps the transition it was recorded with; give several the same name '
+                       '(a R, i R … → hh) and each of those vowels gets its own recorded way in. Below: '
+                       'which transitions come from recordings and which get spliced.').grid(
+            row=0, column=0, sticky='ew')
+        bar = ttk.Frame(top, padding=(12, 8, 12, 0))
+        bar.grid(row=1, column=0, sticky='ew')
+        ttk.Label(bar, text='Search').pack(side='left')
         q = tk.StringVar()
-        sentry = ttk.Entry(srow, textvariable=q)
-        sentry.pack(side='left', fill='x', expand=True, padx=(6, 0))
-        count = ttk.Label(top, text='', padding=(10, 0, 10, 0))
-        count.pack(anchor='w')
-        wrap = ttk.Frame(top, padding=(10, 4))
-        wrap.pack(fill='both', expand=True)
-        canvas = tk.Canvas(wrap, highlightthickness=0)
-        sb = ttk.Scrollbar(wrap, orient='vertical', command=canvas.yview)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side='right', fill='y')
-        canvas.pack(side='left', fill='both', expand=True)
-        body = ttk.Frame(canvas)
-        canvas.create_window((0, 0), window=body, anchor='nw')
-        body.bind('<Configure>', lambda _ev: canvas.configure(scrollregion=canvas.bbox('all')))
+        search = ttk.Entry(bar, textvariable=q, width=28)
+        search.pack(side='left', padx=6)
+        show_all = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text='Show every alias (also the ones that already sing)',
+                        variable=show_all).pack(side='left', padx=(12, 0))
+        count = ttk.Label(bar, style='Hint.TLabel')
+        count.pack(side='right')
+        sf = ScrollFrame(top)
+        sf.grid(row=3, column=0, sticky='nsew', padx=12, pady=(6, 0))
+        body = sf.body
+        SHOW = 200                                    # widgets per view; search always covers every alias
 
-        def _wheel(ev):
-            canvas.yview_scroll(-1 if ev.delta > 0 else 1, 'units')
+        cov_box = ttk.LabelFrame(top, labelwidget=ttk.Label(top, text=' Transitions ', style='Sec.TLabel'),
+                                 padding=(10, 4))
+        cov_box.grid(row=4, column=0, sticky='ew', padx=12, pady=(8, 0))
+        cov_sf = ScrollFrame(cov_box)
+        cov_sf.configure(height=150)
+        cov_sf.pack(fill='both', expand=True)
+        cov_sf.pack_propagate(False)
+        cov = cov_sf.body
+        pending = []
 
-        top.bind_all('<MouseWheel>', _wheel)
-        top.bind_all('<Button-4>', lambda _ev: canvas.yview_scroll(-1, 'units'))
-        top.bind_all('<Button-5>', lambda _ev: canvas.yview_scroll(1, 'units'))
+        def coverage(*_a):
+            if pending:
+                return
+            pending.append(top.after_idle(_coverage))
 
-        def _close():
-            for seq in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
-                try:
-                    top.unbind_all(seq)
-                except Exception:  # noqa: BLE001 - unbinding a dead widget is fine
-                    pass
-            top.destroy()
+        def _coverage():
+            pending.clear()
+            for w in cov.winfo_children():
+                w.destroy()
+            chosen = {}
+            for it in items:
+                ph = it['ph'].get().strip()
+                if it['inc'].get() and ph:
+                    chosen.setdefault(ph, []).append(it)
+            if not chosen:
+                ttk.Label(cov, text='Nothing ticked yet.', style='Hint.TLabel').grid(row=0, column=0, sticky='w')
+                return
+            r = 0
+            for ph in sorted(chosen):
+                its = chosen[ph]
+                if ph not in ends:                    # endings ("a R" only) default to phrase end
+                    ends[ph] = tk.BooleanVar(value=all(it['lead'] for it in its))
+                ttk.Label(cov, text=ph, style='Sec.TLabel').grid(row=r, column=0, sticky='nw', padx=(0, 10))
+                ttk.Label(cov, style='Hint.TLabel', wraplength=760, justify='left',
+                          text='%s · from %s' % (its[0]['grp'].get(), ', '.join(
+                              '%s ×%d' % (it['key'], it['count']) for it in its))).grid(
+                    row=r, column=1, columnspan=8, sticky='w')
+                r += 1
+                rec = {}
+                for it in its:
+                    if it['lead']:
+                        rec[it['lead']] = rec.get(it['lead'], 0) + it['count']
+                line = ttk.Frame(cov)
+                line.grid(row=r, column=1, columnspan=8, sticky='w')
+                for v in vowels:
+                    n = rec.get(v, 0)
+                    ttk.Label(line, text='%s→%s %s' % (v, ph, '✔ %d' % n if n else '~ splice'),
+                              style='Rec.TLabel' if n else 'Splice.TLabel').pack(side='left', padx=(0, 12))
+                alone = sum(it['count'] for it in its if not it['lead'])
+                ttk.Label(line, text='Sil→%s %s' % (ph, '✔ %d' % alone if alone else '—'),
+                          style='Rec.TLabel' if alone else 'Hint.TLabel').pack(side='left', padx=(0, 12))
+                ttk.Label(line, text='%s→Sil ✔' % ph, style='Rec.TLabel').pack(side='left', padx=(0, 12))
+                r += 1
+                into = ttk.Frame(cov)
+                into.grid(row=r, column=1, columnspan=8, sticky='w', pady=(0, 6))
+                lead_in = tk.BooleanVar(value=not ends[ph].get())
+                lead_in.trace_add('write', lambda *_a, p=ph, b=lead_in: ends[p].set(not b.get()))
+                ttk.Checkbutton(into, variable=lead_in,
+                                text='%s leads into singing (%s→a, %s→i …, spliced). Off = it only ends a phrase, '
+                                     'like a breath out.' % (ph, ph, ph)).pack(side='left')
+                r += 1
 
-        groups = list(_SelU.PHONETIC_GROUPS)
-        entries = []  # tick-state for EVERY alias; only the matches get widgets
-        for raw, grp, note in rows:
-            inc = tk.BooleanVar(value=raw in cur)
-            ph0, _v0, g0 = cur.get(raw, (None, None, None))
-            if ph0 is None:
-                ph0 = _SelU.suggest_extra_phoneme(raw, taken)
-                taken.add(ph0)
-            ty0 = g0 if g0 in _SelU.PHONETIC_GROUPS else ('Vowels' if _v0 else 'Whisper')
-            entries.append({'raw': raw, 'grp': grp, 'note': note or '',
-                            'inc': inc, 'ph': tk.StringVar(value=ph0),
-                            'ty': tk.StringVar(value=ty0)})
+        def sync_group(it):
+            ph = it['ph'].get().strip()
+            for other in items:
+                if other is not it and other['ph'].get().strip() == ph:
+                    other['grp'].set(it['grp'].get())
+            coverage()
 
-        def _render(vis):
+        def render(vis):
             for w in body.winfo_children():
                 w.destroy()
-            for i, e in enumerate(vis[:SHOW]):
-                ttk.Checkbutton(body, variable=e['inc']).grid(row=i, column=0, sticky='w')
-                ttk.Label(body, text='%s  (%s)%s' % (e['raw'], e['grp'], e['note']))\
-                    .grid(row=i, column=1, sticky='w', padx=4)
-                ttk.Entry(body, textvariable=e['ph'], width=10).grid(row=i, column=2, padx=4)
-                ttk.OptionMenu(body, e['ty'], e['ty'].get(), *groups)\
-                    .grid(row=i, column=3, padx=4)
-            canvas.yview_moveto(0)
-            canvas.configure(scrollregion=canvas.bbox('all'))
+            for col, txt in enumerate(('', 'Alias', 'Now', 'Phoneme', 'Group', 'Transition')):
+                ttk.Label(body, text=txt, style='Sec.TLabel').grid(row=0, column=col, sticky='w', padx=2,
+                                                                   pady=(0, 2))
+            for i, it in enumerate(vis[:SHOW], start=1):
+                ttk.Checkbutton(body, variable=it['inc'], width=2).grid(row=i, column=0, sticky='w', padx=2)
+                ttk.Label(body, text='%s  ×%d' % (it['key'], it['count']) if it['count'] else it['key'],
+                          width=24).grid(row=i, column=1, sticky='w', padx=2)
+                ttk.Label(body, text=it['maps_to'], width=22, style='Hint.TLabel').grid(row=i, column=2,
+                                                                                        sticky='w', padx=2)
+                ttk.Entry(body, textvariable=it['ph'], width=10).grid(row=i, column=3, sticky='w', padx=2)
+                cb = ttk.Combobox(body, textvariable=it['grp'], values=groups, width=17, state='readonly')
+                cb.grid(row=i, column=4, sticky='w', padx=2)
+                cb.bind('<<ComboboxSelected>>', lambda _e, x=it: sync_group(x))
+                ttk.Label(body, textvariable=it['trans'], width=16, style='Info.TLabel').grid(row=i, column=5, sticky='w', padx=2)
+            sf.canvas.yview_moveto(0)
 
-        def _apply_filter(*_a):
-            needle = q.get().lower()
-            matches = [e for e in entries
-                       if not needle or needle in e['raw'].lower() or needle in e['grp'].lower()]
-            _render(matches)
-            if not matches:
-                count.config(text='No match (%d sounds total)' % len(entries))
-            elif len(matches) > SHOW:
-                count.config(text='Showing %d of %d matches (%d sounds total)' % (
-                    SHOW, len(matches), len(entries)))
-            else:
-                count.config(text='Showing %d of %d sounds' % (len(matches), len(entries)))
+        def refilter(*_a):
+            needle = q.get().strip().lower()
+            vis = [it for it in items if (show_all.get() or it['kind'] != 'sung' or it['inc'].get())
+                   and (not needle or needle in it['key'].lower() or needle in it['maps_to'].lower())]
+            vis.sort(key=lambda it: not it['inc'].get())             # ticked ones first
+            render(vis)
+            n_sung = sum(1 for it in items if it['kind'] == 'sung')
+            count.configure(text='showing %d of %d%s' % (
+                min(len(vis), SHOW), len(vis),
+                '' if show_all.get() else ' (+%d that already sing)' % n_sung if n_sung else ''))
 
-        q.trace_add('write', _apply_filter)
-        _apply_filter()
-        sentry.focus_set()
-        btns = ttk.Frame(top, padding=(10, 6))
-        btns.pack(fill='x')
+        q.trace_add('write', refilter)
+        show_all.trace_add('write', refilter)
+        for it in items:
+            it['inc'].trace_add('write', coverage)
+            it['ph'].trace_add('write', coverage)
+        refilter()
+        _coverage()
+        search.focus_set()
 
-        def _ok():
-            parts = []
-            for e in entries:
-                if e['inc'].get():
-                    raw = e['raw']
-                    if any(sep in raw for sep in (',', ';', ':', '\n')):
-                        return messagebox.showwarning(
-                            'Custom extras', '%r has a comma/semicolon and cannot be used.' % raw)
-                    parts.append('%s=%s:%s' % (raw, e['ph'].get().strip() or 'xx', e['ty'].get()))
+        def wheel_off():
+            try:
+                top.unbind_all('<MouseWheel>')
+            except tk.TclError:
+                pass
+
+        def close():
+            wheel_off()
+            top.destroy()
+
+        def ok():
+            parts, seen = [], {}
+            for it in items:
+                if not it['inc'].get():
+                    continue
+                ph, alias = it['ph'].get().strip(), it['key']
+                if any(sep in alias for sep in ',;:=\n'):
+                    return messagebox.showwarning('Custom extras', '%r has , ; : or = in it, so it cannot be '
+                                                                   'written as a custom extra.' % alias, parent=top)
+                if not ph:
+                    return messagebox.showwarning('Custom extras', 'Give %r a phoneme name.' % alias, parent=top)
+                if ph in sung:
+                    return messagebox.showwarning('Custom extras', '%r is already a singing phoneme: pick another '
+                                                                   'name for %r.' % (ph, alias), parent=top)
+                if seen.setdefault(ph, it['grp'].get()) != it['grp'].get():
+                    return messagebox.showwarning('Custom extras', '%r has two groups (%s, %s): pick one.'
+                                                  % (ph, seen[ph], it['grp'].get()), parent=top)
+                end = ends.get(ph)
+                parts.append('%s=%s:%s%s' % (alias, ph, it['grp'].get(), ':end' if end and end.get() else ''))
             spec = '; '.join(parts)
             try:
-                _SelU.parse_custom_extras(spec)
+                _S.parse_custom_extras(spec)
             except ValueError as ex:
-                return messagebox.showwarning('Custom extras', str(ex))
+                return messagebox.showwarning('Custom extras', str(ex), parent=top)
             self.v['custom_extras'].set(spec)
             self.log('Custom extras: %s\n' % (spec or 'none'))
-            _close()
+            close()
 
-        ttk.Button(btns, text='OK', command=_ok).pack(side='left')
-        ttk.Button(btns, text='Cancel', command=_close).pack(side='left', padx=6)
-
+        btns = ttk.Frame(top, padding=(12, 10))
+        btns.grid(row=5, column=0, sticky='ew')
+        ttk.Button(btns, text='OK', style='Accent.TButton', command=ok).pack(side='left')
+        ttk.Button(btns, text='Cancel', command=close).pack(side='left', padx=6)
+        ttk.Button(btns, text='Untick all', command=lambda: [it['inc'].set(False) for it in items]).pack(
+            side='right')
+        top.protocol('WM_DELETE_WINDOW', close)
 
     def _v_mode(self):
         return (self.v['v_mode'].get().split() or ['auto'])[0]
@@ -1252,10 +1318,6 @@ class App(tk.Tk):
                 raise ValueError('EVEC: %s' % _ex)
         if not v['extras'].get():
             args += ['--extras', 'none']
-        else:
-            _on = [_k for _k in EXTRA_KEYS if self.v['ex_' + _k].get()]
-            if len(_on) < len(EXTRA_KEYS):
-                args += ['--extras', ','.join(_on) if _on else 'none']
         if _em:
             args += ['--evec-map', _em]
         if _ep:

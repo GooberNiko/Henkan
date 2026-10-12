@@ -43,7 +43,7 @@ class Converter:
         self.avoid = {tuple(u.split()) for u in avoid}       # units not to take from recordings
         self.colors = 'merge' if merge else colors          # main | evec | merge
         self.evec = evec and self.colors == 'evec'
-        # extras: True/None = all, False = none, or a spec like 'br1,brE,rr,vend'
+        # built-in extras (vowel endings "a R" -> [a Sil]): True/None = on, False = off, or 'vend' / 'none'
         if extras in (True, None):
             self.extras_want = None
         elif extras in (False,):
@@ -55,8 +55,9 @@ class Converter:
         self.evec_phonemes = Sel.parse_evec_phonemes(evec_phonemes)
         self.evec_mode = Sel.normalize_evec_mode(evec_mode)
         self.evec_vowels_only = self.evec_mode == 'vowels'
-        # custom extras: any UTAU alias -> standalone phoneme with a chosen type
+        # custom extras: any UTAU alias -> a phoneme of its own with a chosen group; .ends only end a phrase
         self.custom_extras = Sel.parse_custom_extras(custom_extras)
+        self.custom_ends = self.custom_extras.ends
         self.custom_dict = {ph: (grp, v) for _, (ph, v, grp) in self.custom_extras.items()}
         if self.custom_extras:
             self.log('custom extras: %s' % ', '.join('%s->%s (%s)' % (a, ph, 'voiced' if v else 'unvoiced')
@@ -72,8 +73,8 @@ class Converter:
         self.log('folders/suffixes: %s' % ', '.join(all_groups))
         if groups:
             rx = re.compile(groups)
-            # extras (breaths, rolled r ...) are used from their bonus folder even when --groups picks
-            # only the singing folders
+            # extras (vowel endings, custom extras) are used from their bonus folder even when --groups
+            # picks only the singing folders
             self.entries = [e for e in self.entries if rx.search(e.group)
                             or (self.extras and e.extra_folder and self._extra(e))
                             or self._custom_extra(e) is not None]
@@ -91,8 +92,8 @@ class Converter:
         self.v_real = self.lang == 'ja' and (v_mode == 'v' or (v_mode == 'auto' and self.n_v > 0))
         if self.lang == 'ja' and (self.n_v or v_mode == 'v'):
             self.log('ヴ: %d recordings, sung as %s' % (self.n_v, "v / v'" if self.v_real else "b / b'"))
-        self.extras_found = sorted({p for e in self.entries for p in (self._extra(e) or [])
-                                    if p in P.EXTRAS or p in self.custom_dict})
+        self.extras_found = sorted({p for e in self.entries for p in (self._custom_extra(e) or [])
+                                    if p in self.custom_dict})
         self.dict = None
         self.use_dictionary(dbtool_io.load_dictionary(dict_path) if dict_path else None, extend_dict)
         self.skipped = []          # (alias, wav, reason)
@@ -100,15 +101,13 @@ class Converter:
 
     def use_dictionary(self, d, extend=True):
         """Convert against the DB phonetic dictionary d, plus the phonemes this bank brings that it lacks:
-        b, b', p\\' (extend), v / v', breaths and other extras, custom extras."""
+        b, b', p\\' (extend), v / v', custom extras."""
         if d is not None:
             if extend and self.lang == 'ja':
                 d = dbtool_io.extend_dictionary(d, P.JA_EXTRA)
             if self.v_real:
                 d = dbtool_io.extend_dictionary(d, P.V_DICT)
-            add = {p: P.EXTRA_DICT[p] for p in self.extras_found if p in P.EXTRA_DICT}
-            add.update({p: self.custom_dict[p] for p in self.extras_found if p in self.custom_dict})
-            d = dbtool_io.extend_dictionary(d, add)
+            d = dbtool_io.extend_dictionary(d, {p: self.custom_dict[p] for p in self.extras_found})
         self.dict = d
 
     # -------------------------------------------------------------- voice colours and pitches
@@ -183,14 +182,10 @@ class Converter:
         return lambda p: p if not sfx or p in P.SIL else p + sfx
 
     def extra_phonemes(self):
-        return P.EXTRAS | set(self.custom_dict)
+        return set(self.custom_dict)
 
     def _extra_voiced(self, ex):
-        if ex in P.TRILL:
-            return True
-        if ex in self.custom_dict:
-            return self.custom_dict[ex][1]
-        return False
+        return ex in self.custom_dict and self.custom_dict[ex][1]
 
     def _color_allows(self, color, phs):
         # per-colour phoneme allowlist (--evec-phonemes Soft:a,i,e): an entry is kept when every
@@ -225,31 +220,43 @@ class Converter:
 
     # -------------------------------------------------------------- phonemes
     def _custom_extra(self, e):
-        """A user-defined extra: exact alias match -> [Sil, PH, Sil], or None.
+        """A user-defined extra: exact alias match -> [Sil, PH, Sil], or None. An alias that starts with a
+        vowel ("a R", "a laugh") keeps the transition it recorded: [V, PH, Sil].
 
         Matches the oto alias as written (raw_alias) and the stripped alias, so
         'cough', 'cough3' suffixes and prefix.map tags all resolve."""
         if not self.custom_extras:
             return None
-        for key in (e.raw_alias.strip(), e.alias.strip()):
-            if key in self.custom_extras:
-                return ['Sil', self.custom_extras[key][0], 'Sil']
-            for alias, (ph, _v, _g) in self.custom_extras.items():
-                if key.lower() == alias.lower():
-                    return ['Sil', ph, 'Sil']
+        for key in dict.fromkeys((e.raw_alias.strip(), (e.alias + (str(e.dup) if e.dup else '')).strip(),
+                                  e.alias.strip())):
+            ph = self.custom_extras[key][0] if key in self.custom_extras else None
+            if ph is None and P.alias_to_phonemes(e.alias, getattr(self, 'lang', 'ja')) is None:
+                # "Cough" for "cough", but never "a R" for "a r" (the a -> r join of a CVVC bank)
+                ph = next((p for alias, (p, _v, _g) in self.custom_extras.items()
+                           if key.lower() == alias.lower()), None)
+            if ph is not None:
+                lead = P.lead_vowel(key) if getattr(self, 'lang', 'ja') == 'ja' else None
+                return [lead or 'Sil', ph, 'Sil']
         return None
 
+    def _vowel_ending(self, e):
+        """The built-in extra: a vowel ending "a R" -> [a Sil] (when on), or None."""
+        return P.extra_alias(e.alias + (str(e.dup) if e.dup else '')) if self.extras else None
+
     def _extra(self, e):
-        """Phonemes of an UTAU extra (breath, vowel ending, rolled r, custom), or None."""
+        """Phonemes of an UTAU extra: a custom extra first (explicitly asked for), else a vowel ending."""
         ce = self._custom_extra(e)
-        if ce is not None:
-            return ce  # explicitly requested: not gated by the built-in extras filter
-        if not self.extras:
-            return None  # filtered
-        ex = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''), getattr(e, 'extra_folder', False))
-        if ex is not None and self.extras_want is not None and P.extra_kind(ex) not in self.extras_want:
+        return ce if ce is not None else self._vowel_ending(e)
+
+    def _ending_too(self, e, phs):
+        """A custom extra on a vowel ending ("a R=hh", CVVC "a -=hh") keeps the ending itself too: [a Sil]
+        from the same recording. Any other alias a custom extra takes is used for the custom phoneme only."""
+        if phs is None or len(phs) != 3 or phs[0] == 'Sil' or phs[1] not in self.custom_dict:
             return None
-        return ex
+        plain = self._vowel_ending(e) or P.alias_to_phonemes(e.alias, self.lang, self.v_real)
+        if plain != [phs[0], 'Sil'] or (self.dict is not None and any(p not in self.dict for p in plain)):
+            return None
+        return plain
 
     def map_phonemes(self, e):
         ex = self._extra(e)
@@ -257,10 +264,8 @@ class Converter:
             if self.dict is not None and any(p not in self.dict for p in ex):
                 return None, 'extra phoneme not in DB dictionary'
             return ex, None
-        if self.extras_want is not None:
-            raw = P.extra_alias(e.alias + (str(e.dup) if e.dup else ''), getattr(e, 'extra_folder', False))
-            if raw is not None:
-                return None, 'extra %s not selected' % P.extra_kind(raw)
+        if not self.extras and P.extra_alias(e.alias + (str(e.dup) if e.dup else '')) is not None:
+            return None, 'vowel endings are off'
         ph = None
         if self.lang == 'en' and e.full and e.full != e.alias:
             ph = P.alias_to_phonemes(e.full, 'en')       # "b3" is b + 3 (bird), not "b" duplicate 3
@@ -282,8 +287,9 @@ class Converter:
 
     # -------------------------------------------------------------- segmentation
     def segment_extra(self, e, phs):
-        """Extras are cut by level and voicing, not by oto timing: a breath / rolled r is the loud part
-        between silences, a vowel ending is voiced until it stops, then the breath that follows."""
+        """Extras are cut by level and voicing, not by oto timing: a lone sound (a breath, a cough) is the
+        loud part between silences; a vowel ending is voiced until it stops; "a R=hh" / "a laugh=lf" is
+        that vowel, then the sound that follows it."""
         x, ft = self.load(e.wav)
         dur = len(x) / TARGET_SR
         off, end = e.offset, e.end(dur)
@@ -320,22 +326,19 @@ class Converter:
         rest = act[kv_end + 1:]
         if phs[1:] == ['Sil']:                                 # a R: vowel ending
             return Clip(e, phs, start, min(dur, tv + 0.25), [tv], [True], mute_after=tv + 0.02), None
-        if phs[1] == 'brE':                                    # a R息: the breath out follows at once
+        if len(phs) == 3 and phs[2] == 'Sil':                  # a R息, a R as hh, "a laugh": V, then the sound
+            if not rest.any() and not self._extra_voiced(phs[1]):
+                return None, 'no sound after the vowel'        # an ending that just stops: [V X] is spliced
             k1 = kv_end + 1 + (len(rest) - 1 - int(np.argmax(rest[::-1])) if rest.any() else 0)
             be = max(t(k1), tv + 0.08)
+            if self._extra_voiced(phs[1]):
+                # a voiced sound carries on the voicing: it starts at the oto's preutterance (or halfway)
+                v0 = t(kv)
+                tv = e.preutter if v0 + 0.1 < e.preutter < tv - 0.06 else (v0 + tv) / 2
+                start = max(off, tv - 0.6)
             return Clip(e, phs, start, min(dur, be + 0.15), [tv, be], [True, bool(rest.any())],
                         mute_after=be), None
-        # a R吸: vowel, pause, breath in
-        gap = int(0.06 / audio.HOP)
-        later = act[kv_end + 1 + gap:]
-        if not later.any():
-            return None, 'no breath after the vowel'
-        k2 = kv_end + 1 + gap + int(np.argmax(later))
-        k3 = len(act) - 1 - int(np.argmax(act[::-1]))
-        b2, b3 = t(k2) - 0.01, t(k3) + 0.01
-        if b3 - b2 < 0.08:
-            return None, 'breath too short'
-        return Clip(e, phs, start, min(dur, b3 + 0.15), [tv, b2, b3], [True, True, True], mute_after=b3), None
+        return None, 'not an extra this tool can cut'
 
     def segment(self, e, phs):
         if any(p in self.extra_phonemes() for p in phs) or self._extra(e) is not None:
@@ -481,15 +484,18 @@ class Converter:
             if (self.extras or self.custom_extras) and self.splice:
                 here = {p for (gg, a, b) in cands if gg == g for p in (a, b)
                         if p in self.extra_phonemes()}
+                # the bank's own vowels (English ones too); ん only in Japanese
+                vowels = sorted({p for (gg, a, b) in cands if gg == g for p in (a, b) if p in P.VOWELS})
+                nasal = ['N\\'] if self.lang == 'ja' else []
                 want = set()
                 onsets = sorted({k[2] for k in cands if k[0] == g and k[1] == 'Sil'
-                                 and k[2] not in P.VOWELS and k[2] not in P.EXTRAS})
+                                 and k[2] not in P.VOWELS and k[2] not in self.extra_phonemes()})
                 for x in here:
-                    want |= {(v, x) for v in self.VOWELS_JA + ['N\\']}
-                    if x != 'brE':                       # brE ends a phrase; the others lead into singing
-                        want |= {(x, v) for v in self.VOWELS_JA}
-                    if x in P.BREATHS and x != 'brE':    # a breath, then straight into "sa", "ka" ...
-                        want |= {(x, c) for c in onsets}
+                    want |= {(v, x) for v in vowels + nasal}
+                    if x not in self.custom_ends:        # ':end' ones (a breath out) only end a phrase
+                        want |= {(x, v) for v in vowels}
+                        if not self._extra_voiced(x):    # a breath, then straight into "sa", "ka" ...
+                            want |= {(x, c) for c in onsets}
                 have = {(k[1], k[2]) for k in cands if k[0] == g}
                 for X, Y in sorted(want - have):
                     if Y in P.VOWELS or X in P.VOWELS or 'N\\' in (X, Y):
@@ -516,10 +522,10 @@ class Converter:
         return best
 
     def _splice_extra(self, clips, g, X, Y):
-        """[V extra] / [extra V]: a sung vowel joined to a breath or rolled r recorded on its own. A
-        breath starts as the vowel stops (fade out, then the breath); a rolled r crossfades."""
+        """[V extra] / [extra V]: a sung vowel joined to an extra recorded on its own. An unvoiced one (a
+        breath) starts as the vowel stops (fade out, then the breath); a voiced one (a rolled r) crossfades."""
         sr = TARGET_SR
-        ex, vo = (Y, X) if Y in P.EXTRAS else (X, Y)
+        ex, vo = (Y, X) if Y in self.extra_phonemes() else (X, Y)
         t_ex = self._extra_take(clips, g, ex)
         t_vo = self._long_segment(clips, g, vo)
         if t_ex is None or t_vo is None:
@@ -1229,21 +1235,24 @@ class Converter:
             if phs is None:
                 self.skipped.append((e.raw_alias, e.wav, why))
                 continue
-            if not self._color_allows(e.color, phs):
-                self.skipped.append((e.raw_alias, e.wav, 'phoneme not selected for colour %s' % e.color))
-                continue
             if not os.path.exists(e.wav):
                 self.skipped.append((e.raw_alias, e.wav, 'wav missing'))
                 continue
-            c, why = self.segment(e, phs)
-            if c is None:
-                self.skipped.append((e.raw_alias, e.wav, why))
-                continue
-            if self._closure_head(c):
-                self.n_closure += 1
-            clips.append(c)
-            if self.derive:
-                clips.extend(self.derive_silence(c))
+            for seq in [q for q in (phs, self._ending_too(e, phs)) if q is not None]:
+                tag = '' if seq is phs else 'vowel ending: '
+                if not self._color_allows(e.color, seq):
+                    self.skipped.append((e.raw_alias, e.wav, tag + 'phoneme not selected for colour %s' % e.color))
+                    continue
+                c, why = self.segment(e, seq)
+                if c is None:
+                    self.skipped.append((e.raw_alias, e.wav, tag + why))
+                    continue
+                clips.append(c)
+                if seq is phs:
+                    if self._closure_head(c):
+                        self.n_closure += 1
+                    if self.derive:
+                        clips.extend(self.derive_silence(c))
 
         self._warn_no_vowels(clips)
         # pick the best clip for every (group, diphone)
@@ -1519,17 +1528,15 @@ class Converter:
             lines.append('CV entries whose offset cut into the consonant (closure, nasal murmur), start moved back: %d'
                          % self.n_closure)
         if getattr(self, 'extras_found', None):
-            xp = P.EXTRAS | set(getattr(self, 'custom_dict', {}))
+            xp = set(getattr(self, 'custom_dict', {}))
             units = sorted({row[2] for row in manifest if row[1] == 'art'
                             and any(p.split('#')[0] in xp for p in row[2].split())})
-            lines.append('extras (type these phonemes in the editor): %s' % ', '.join(self.extras_found))
-            what = {'brE': 'breath out at the end of a phrase', 'brI': 'breath in', 'rr': 'rolled r'}
+            lines.append('custom extras (type these phonemes in the editor): %s' % ', '.join(self.extras_found))
             for x in self.extras_found:
-                if x not in what:
-                    what[x] = 'custom extra' if x in getattr(self, 'custom_dict', {}) else 'breath'
-                src = sorted({row[4] for row in manifest if row[1] == 'art' and not row[8]
+                rec = sorted({row[4] for row in manifest if row[1] == 'art' and not row[8]
                               and x in [p.split('#')[0] for p in row[2].split()]})
-                lines.append('  %-4s %-36s from: %s' % (x, what.get(x, 'breath'), ', '.join(src) or '-'))
+                lines.append('  %-6s %-14s from: %s' % (x, '(phrase end)' if x in self.custom_ends else '',
+                                                        ', '.join(rec) or '-'))
             lines.append('  units: %s' % ', '.join('[%s]' % u for u in units))
         if getattr(self, 'n_v', 0) or getattr(self, 'v_real', False):
             lines.append("ヴ (%d recordings): sung as %s" % (
