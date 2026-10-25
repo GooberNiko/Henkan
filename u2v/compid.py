@@ -277,6 +277,20 @@ def compids_in_use():
     return found
 
 
+def registered_name(compid):
+    """The BankName a V4 registration of this ID carries, or None (not registered / not V4 / not Windows)."""
+    if sys.platform != 'win32':
+        return None
+    import winreg
+    for root in ('HKLM\\SOFTWARE\\VOCALOID4\\DATABASE', 'HKLM\\SOFTWARE\\POCALOID4\\DATABASE'):
+        try:
+            with _reg_open(root + '\\' + compid) as k:
+                return winreg.QueryValueEx(k, 'BankName')[0]
+        except OSError:
+            pass
+    return None
+
+
 def normalize(compid):
     """Uppercase + validate the shape; raises CompIDError if malformed."""
     compid = (compid or '').strip().upper()

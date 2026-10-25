@@ -45,12 +45,14 @@ SONGS = {
 # English: (lyric, VOCALOID English phonemes) per note; '-' is a rest, a trailing ' ~' makes the note long
 SONGS_EN = {
     'en': [
-        [('hel', 'h e'), ('lo', 'l @U'), ('world', 'w @r l d'), '-'],
-        [('this', 'D I s'), ('is', 'I z'), ('a', '@'), ('test', 't e s t'), '-'],
-        [('star', 's t Q'), ('light', 'l aI t'), ('blue', 'b l u:'), ('sky', 's k aI ~'), '-'],
-        [('cat', 'k { t'), ('cut', 'k V t'), ('book', 'b U k'), ('boy', 'b OI'), ('now', 'n aU ~'), '-'],
+        # as the editor spells them: aspirated onsets (kh, bh ...), clear l0 before a vowel, plain after s
+        [('hel', 'h e'), ('lo', 'l0 @U'), ('world', 'w @r l d'), '-'],
+        [('this', 'D I s'), ('is', 'I z'), ('a', '@'), ('test', 'th e s t'), '-'],
+        [('star', 's t Q'), ('light', 'l0 aI t'), ('blue', 'bh l0 u:'), ('sky', 's k aI ~'), '-'],
+        [('cat', 'kh { t'), ('cut', 'kh V t'), ('book', 'bh U k'), ('boy', 'bh OI'), ('now', 'n aU ~'), '-'],
         [('sing', 's I N'), ('ing', 'I N'), ('the', 'D @'), ('song', 's O: N'), ('for', 'f O:'), ('you', 'j u:'), '-'],
-        [('day', 'd eI ~'), ('and', '{ n d'), ('night', 'n aI t'), ('we', 'w i:'), ('go', 'g @U ~'), '-'],
+        [('day', 'dh eI ~'), ('and', '{ n d'), ('night', 'n aI t'), ('we', 'w i:'), ('go', 'gh @U ~'), '-'],
+        [('feel', 'f i: l'), ('red', 'r e d'), ('rock', 'r Q k'), ('pie', 'ph aI ~'), '-'],
         [('spring', 's p r I N'), ('think', 'T I N k'), ('judge', 'dZ V dZ'), ('church', 'tS @r tS'), '-'],
         [('a', 'Q ~'), ('e', 'i: ~'), ('o', '@U ~'), ('u', 'u: ~'), '-'],
     ],

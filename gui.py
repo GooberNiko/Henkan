@@ -156,6 +156,7 @@ class Runner:
                                  'ok' if code == 0 else 'err')
                     if self.done:
                         self.done(code)
+                    self.app.step_ended(code)
                     return
                 tag = 'err' if re.search(r'Traceback|Error|failed|problems', line) else None
                 self.app.log(line, tag)
@@ -190,7 +191,7 @@ class App(tk.Tk):
             self.geometry(self.v['geometry'].get())
         self.protocol('WM_DELETE_WINDOW', self._close)
         if self.v['bank'].get() and os.path.isdir(self.v['bank'].get()):
-            self.after(200, self.scan)
+            self.after(200, lambda: (self.scan(), self._easy_check()))
 
     # ------------------------------------------------------------------ state
     def _vars(self):
@@ -262,9 +263,17 @@ class App(tk.Tk):
         style.configure('Big.TButton', padding=(12, 4))
         style.configure('TNotebook.Tab', padding=(12, 4))
 
+        style.configure('Step.TLabel', font=(UI_FONT_BOLD, 13), foreground=INK)
+        style.configure('Num.TLabel', font=(UI_FONT_BOLD, 13), foreground=ACCENT)
+        style.configure('Easy.TLabel', font=(UI_FONT, 10))
+        style.configure('Good.TLabel', font=(UI_FONT, 10), foreground='#15803d')
+        style.configure('Bad.TLabel', font=(UI_FONT, 10), foreground='#c2410c')
+        style.configure('Wait.TLabel', font=(UI_FONT, 10), foreground=HINT)
+        style.configure('Go.TButton', font=(UI_FONT_BOLD, 12), padding=(24, 10))
+
         self._header()
 
-        src = ttk.Frame(self, padding=(12, 10, 12, 0))
+        self.src = src = ttk.Frame(self, padding=(12, 10, 12, 0))
         src.pack(fill='x')
         src.columnconfigure(1, weight=1)
         ttk.Label(src, text='UTAU bank', style='Head.TLabel').grid(row=0, column=0, sticky='w')
@@ -290,9 +299,10 @@ class App(tk.Tk):
         self.stop_btn.pack(side='right')
         ttk.Button(bar, text='Clear log', command=self.clear_log).pack(side='right', padx=6)
 
-        pw = ttk.PanedWindow(self, orient='vertical')
+        self.pw = pw = ttk.PanedWindow(self, orient='vertical')
         pw.pack(fill='both', expand=True, padx=12, pady=(8, 0))
         self.nb = nb = ttk.Notebook(pw)
+        nb.add(self._tab_easy(nb), text='★  Easy')
         nb.add(self._tab_convert(nb), text='①  Convert')
         nb.add(self._tab_build(nb), text='②  Build singer DB')
         nb.add(self._tab_pack(nb), text='③  Pack & Install')
@@ -301,6 +311,7 @@ class App(tk.Tk):
             nb.select(int(self.v['tab'].get()))
         except (ValueError, tk.TclError):
             pass
+        nb.bind('<<NotebookTabChanged>>', lambda _e: self._tab_changed())
         pw.add(nb, weight=4)
 
         lf = ttk.Frame(pw, padding=(0, 6, 0, 0))
@@ -317,6 +328,278 @@ class App(tk.Tk):
         self.text.tag_configure('err', foreground='#f48771')
         self.bind_all('<Control-l>', lambda _e: self.clear_log())
         self.bind_all('<F5>', lambda _e: self.scan())
+        self._tab_changed()
+
+    def _tab_changed(self):
+        """The Easy tab asks for the bank itself: the bank/dictionary rows on top are for the other tabs."""
+        easy = self.nb.index('current') == 0
+        if easy and getattr(self, '_src_shown', True):
+            self.src.pack_forget()
+        elif not easy and not getattr(self, '_src_shown', True):
+            self.src.pack(fill='x', before=self.pw)
+        self._src_shown = not easy
+        if easy:
+            self._easy_check()
+            self.after(300, self._small_log)          # once the window has its real size
+
+    def _small_log(self):
+        """On the Easy tab the log is only for the curious: a few lines at the bottom."""
+        h = self.pw.winfo_height()
+        if h > 300 and self.pw.sashpos(0) < h - 160:
+            self.pw.sashpos(0, h - 130)
+
+    # ------------------------------------------------------------------ easy
+    EASY_STEPS = (('convert', 'Convert the UTAU sounds'),
+                  ('build', 'Build the singer DB (a few minutes; the DBTool works by itself)'),
+                  ('pack', 'Pack it into a voicebank'))
+
+    def _tab_easy(self, nb):
+        """Three steps and one button: the whole bank → voicebank road with every default taken."""
+        sf = ScrollFrame(nb)
+        f = ttk.Frame(sf.body, padding=(18, 14, 18, 10))
+        f.pack(fill='both', expand=True)
+        f.columnconfigure(0, weight=1)
+
+        def step(row, num, title):
+            head = ttk.Frame(f)
+            head.grid(row=row, column=0, sticky='ew', pady=(14 if row else 0, 4))
+            ttk.Label(head, text=num, style='Num.TLabel').pack(side='left', padx=(0, 10))
+            ttk.Label(head, text=title, style='Step.TLabel').pack(side='left')
+            body = ttk.Frame(f, padding=(34, 0, 0, 0))
+            body.grid(row=row + 1, column=0, sticky='ew')
+            body.columnconfigure(1, weight=1)
+            return body
+
+        b = step(0, '1', 'Pick your UTAU voicebank')
+        ttk.Button(b, text='Choose folder…', style='Big.TButton', command=self.pick_bank).grid(
+            row=0, column=0, sticky='w')
+        self.easy_bank = tk.StringVar(value='No voicebank picked yet: choose the folder with its oto.ini.')
+        self.easy_bank_lb = ttk.Label(b, textvariable=self.easy_bank, style='Wait.TLabel', wraplength=640,
+                                      justify='left')
+        self.easy_bank_lb.grid(row=0, column=1, sticky='w', padx=12)
+
+        b = step(2, '2', 'Check your setup')
+        b.columnconfigure(1, weight=0)
+        b.columnconfigure(3, weight=1)
+        self.easy_checks = {}
+        for r, (key, name) in enumerate((('dbtool', 'DBTool'), ('dict', 'Dictionary'), ('pkgs', 'Packages'),
+                                         ('editor', 'Editor'))):
+            ttk.Label(b, text=name, style='Easy.TLabel', width=11).grid(row=r, column=0, sticky='w', pady=2)
+            lb = ttk.Label(b, style='Wait.TLabel', wraplength=560, justify='left')
+            lb.grid(row=r, column=1, sticky='w')
+            btn = ttk.Button(b, text='Find it…')
+            btn.grid(row=r, column=2, sticky='e', padx=(8, 0))
+            self.easy_checks[key] = (lb, btn)
+
+        b = step(4, '3', 'Name your singer and go')
+        ttk.Label(b, text='Singer name', style='Easy.TLabel', width=11).grid(row=0, column=0, sticky='w')
+        ttk.Entry(b, textvariable=self.v['db_name'], width=24, font=(UI_FONT, 10)).grid(row=0, column=1,
+                                                                                        sticky='w')
+        self.easy_name = ttk.Label(b, style='Hint.TLabel')
+        self.easy_name.grid(row=1, column=1, sticky='w', pady=(2, 0))
+        ttk.Checkbutton(b, text='Show the DBTool while it works (only if it keeps getting stuck)',
+                        variable=self.v['dbtool_hidden'], onvalue=False, offvalue=True).grid(
+            row=2, column=1, sticky='w', pady=(6, 0))
+        self.easy_go = ttk.Button(b, text='▶  Make my voicebank', style='Go.TButton', command=self.easy_make)
+        self.easy_go.grid(row=3, column=0, columnspan=2, sticky='w', pady=(12, 6))
+        prog = ttk.Frame(b)
+        prog.grid(row=4, column=0, columnspan=3, sticky='w')
+        self.easy_marks = {}
+        for r, (key, text) in enumerate(self.EASY_STEPS):
+            mark = ttk.Label(prog, text='○', style='Wait.TLabel', width=2)
+            mark.grid(row=r, column=0, sticky='w')
+            lb = ttk.Label(prog, text=text, style='Wait.TLabel')
+            lb.grid(row=r, column=1, sticky='w')
+            self.easy_marks[key] = (mark, lb)
+
+        b = step(6, '4', 'Install it')
+        ttk.Label(b, text='Into', style='Easy.TLabel', width=11).grid(row=0, column=0, sticky='w')
+        self.easy_editor = ttk.Combobox(b, textvariable=self.v['pkg_editor'], width=60, state='readonly')
+        self.easy_editor.grid(row=0, column=1, sticky='w')
+        self.easy_editor.bind('<<ComboboxSelected>>', lambda _e: self._easy_check())
+        self.easy_install = ttk.Button(b, text='Install', style='Accent.TButton', command=self.easy_do_install,
+                                       state='disabled')
+        self.easy_install.grid(row=1, column=0, columnspan=2, sticky='w', pady=(8, 0))
+        self.easy_done = tk.StringVar(value='Make the voicebank first (step 3). Windows asks for permission '
+                                            'when you install.')
+        ttk.Label(b, textvariable=self.easy_done, style='Hint.TLabel', wraplength=640, justify='left').grid(
+            row=2, column=0, columnspan=3, sticky='w', pady=(6, 0))
+
+        ttk.Label(f, text='Want more control (folders, voice colours, extras, CompIDs, V3→V2)? '
+                          'The numbered tabs above have every option.', style='Hint.TLabel').grid(
+            row=8, column=0, sticky='w', pady=(20, 0))
+        self._easy_run = None
+        self._step_log = []
+        self.v['db_name'].trace_add('write', lambda *_a: self._easy_check())
+        return sf
+
+    def _easy_set(self, key, ok, text, fix=None, fix_text='Find it…'):
+        lb, btn = self.easy_checks[key]
+        lb.configure(text=('✔  ' if ok else '✘  ') + text, style='Good.TLabel' if ok else 'Bad.TLabel')
+        if ok or fix is None:
+            btn.grid_remove()
+        else:
+            btn.configure(text=fix_text, command=fix)
+            btn.grid()
+        return ok
+
+    def _easy_check(self):
+        """Re-read the setup and say, in words, what is ready and what is missing. True when it can go."""
+        if not hasattr(self, 'easy_checks'):
+            return False
+        bank = self.v['bank'].get()
+        has_bank = bool(bank) and os.path.isdir(bank) and bool(self.groups)
+        if has_bank:
+            lang = {'ja': 'Japanese', 'en': 'English'}.get(self.detected_lang, 'unknown language')
+            n = sum(c for _g, c in self.groups)
+            self.easy_bank.set('✔  %s  (%s, %d sounds)' % (os.path.basename(bank), lang, n))
+            self.easy_bank_lb.configure(style='Good.TLabel')
+        elif bank:
+            self.easy_bank.set('✘  %s has no oto.ini sounds. Pick the folder the voicebank\'s oto.ini is in.'
+                               % os.path.basename(bank))
+            self.easy_bank_lb.configure(style='Bad.TLabel')
+        else:
+            self.easy_bank.set('No voicebank picked yet: choose the folder with its oto.ini.')
+            self.easy_bank_lb.configure(style='Wait.TLabel')
+
+        ready = has_bank
+        exe = self.v['dbtool'].get()
+        ready &= self._easy_set('dbtool', os.path.isfile(exe),
+                                'VocaloidDBTool3.exe found' if os.path.isfile(exe) else
+                                'VocaloidDBTool3.exe not found. It comes with the VOCALOID3 devkit '
+                                '(easiest: put the Henkan folder inside the devkit folder).',
+                                self._easy_find_dbtool)
+        d = self.v['dict'].get()
+        if d and os.path.isfile(d):
+            ready &= self._easy_set('dict', True, os.path.basename(d))
+        elif has_bank:
+            ready &= self._easy_set('dict', False, 'The devkit\'s phonetic dictionary was not found '
+                                    '(Japanese Dictionary\\Japanese_Dictionary.txt).', self.pick_dict)
+        else:
+            self._easy_set('dict', False, 'found after you pick a voicebank')
+            self.easy_checks['dict'][0].configure(style='Wait.TLabel', text='…  found after you pick a voicebank')
+        missing = self._missing_packages()
+        ready &= self._easy_set('pkgs', not missing,
+                                'all installed' if not missing else 'missing: %s' % ', '.join(missing),
+                                self._easy_install_packages, 'Install')
+        if not getattr(self, '_easy_eds', None):                 # the registry scan: once, not per keystroke
+            self._easy_eds = self._editors()
+        eds = self._easy_eds
+        self.easy_editor['values'] = eds
+        if not self.v['pkg_editor'].get() and getattr(self, '_editor_list', []):
+            self.v['pkg_editor'].set(eds[0])
+        has_ed = bool(getattr(self, '_editor_list', []))
+        self._easy_set('editor', has_ed, ('%d VOCALOID editor(s) found' % len(eds)) if has_ed else
+                       'No VOCALOID editor found. You can still make the voicebank and install it later.')
+        name = self.v['db_name'].get()
+        name_ok = bool(re.fullmatch(r'[A-Za-z0-9]+', name))
+        if name_ok or not name:
+            self.easy_name.configure(text='Letters and digits only (A-Z, 0-9). This is the name you pick in '
+                                          'the editor.', style='Hint.TLabel')
+        else:
+            fixed = re.sub(r'[^A-Za-z0-9]+', '', name)
+            self.easy_name.configure(style='Bad.TLabel', text='✘  Only letters and digits (A-Z, 0-9)%s.' % (
+                ': try "%s"' % fixed if fixed else ''))
+        if not self.runner.busy:
+            self.easy_go.configure(state='normal' if (ready and name_ok) else 'disabled')
+        return ready and name_ok
+
+    @staticmethod
+    def _missing_packages():
+        import importlib.util
+        need = ['numpy'] + (['pywinauto', 'win32gui'] if sys.platform == 'win32' else [])
+        return [m for m in need if importlib.util.find_spec(m) is None]
+
+    def _easy_install_packages(self):
+        self.runner.start([sys.executable, '-m', 'pip', 'install', '-r', os.path.join(ROOT, 'requirements.txt')],
+                          'Installing packages', done=lambda code: messagebox.showinfo(
+                              'Packages', 'Installed. Close Henkan and open it again to use them.')
+                          if code == 0 else None)
+
+    def _easy_find_dbtool(self):
+        self.pick_dbtool()
+        if self.detected_lang in ('ja', 'en'):
+            self._find_dict(self.detected_lang)
+        self._easy_check()
+
+    def _easy_free_db(self):
+        """Point the DB at <devkit>\\Name\\Name, or Name2, Name3 … when that one was built before."""
+        name = self.v['db_name'].get()
+        base = os.path.dirname(self.v['dbtool'].get()) or DEVKIT
+        for k in range(1, 100):
+            n = name if k == 1 else '%s%d' % (name, k)
+            db = os.path.join(base, n, n)
+            if not os.path.exists(db + '.tree') and not os.path.exists(os.path.dirname(db)):
+                return db
+        return os.path.join(base, name, name)
+
+    def easy_make(self):
+        if self.runner.busy or not self._easy_check():
+            return
+        bank = self.v['bank'].get()
+        safe = re.sub(r'[^\w\- ]+', '_', os.path.basename(os.path.normpath(bank))).strip() or 'bank'
+        self.v['out'].set(os.path.join(os.path.dirname(self.v['dbtool'].get()) or DEVKIT, safe + '_seg'))
+        self.v['db_path'].set(self._easy_free_db())
+        for k in ('pkg_db', 'pkg_out', 'pkg_compid', 'pkg_dest'):
+            self.v[k].set('')
+        self.v['pkg_name'].set(self.v['db_name'].get())
+        self.glist.selection_clear(0, 'end')                     # every folder
+        for key in self.easy_marks:
+            self._easy_mark(key, 'todo')
+        self.easy_install.configure(state='disabled')
+        self.easy_done.set('Working… you can keep using the PC.')
+        self._easy_next('convert')
+
+    def _easy_mark(self, key, state):
+        mark, lb = self.easy_marks[key]
+        glyph, style = {'todo': ('○', 'Wait.TLabel'), 'run': ('●', 'Num.TLabel'),
+                        'ok': ('✔', 'Good.TLabel'), 'bad': ('✘', 'Bad.TLabel')}[state]
+        mark.configure(text=glyph, style=style if state != 'run' else 'Bad.TLabel')
+        lb.configure(style=style if state != 'run' else 'Easy.TLabel')
+
+    def _easy_next(self, key):
+        self._easy_run = key
+        self._easy_mark(key, 'run')
+        self.easy_go.configure(state='disabled')
+        nxt = {'convert': lambda: self._easy_after('convert', 'build'),
+               'build': lambda: self._easy_after('build', 'pack'),
+               'pack': lambda: self._easy_after('pack', None)}[key]
+        {'convert': lambda: self.convert(then=nxt), 'build': lambda: self.build(then=nxt),
+         'pack': lambda: self.pack(then=nxt)}[key]()
+        if not self.runner.busy:                     # the step said no (a warning box) before it started
+            self._easy_mark(key, 'bad')
+            self._easy_run = None
+            self._easy_check()
+
+    def _easy_after(self, done, nxt):
+        self._easy_mark(done, 'ok')
+        if nxt:
+            self.after(10, lambda: self._easy_next(nxt))
+            return
+        self._easy_run = None
+        self._easy_check()
+        self.easy_install.configure(state='normal')
+        self.easy_done.set('Your voicebank "%s" is ready. Press Install, then press Yes on the Windows '
+                           'prompt.' % self.v['pkg_name'].get())
+        self.log('Voicebank ready: %s\n' % self.package_dir(), 'ok')
+
+    def step_ended(self, code):
+        """Every finished step comes here; a failed Easy step explains itself in plain words."""
+        if code == 0 or not self._easy_run:
+            return
+        from u2v import explain
+        key, self._easy_run = self._easy_run, None
+        self._easy_mark(key, 'bad')
+        self._easy_check()
+        self.easy_done.set('Stopped at: %s.' % dict(self.EASY_STEPS)[key].split(' (')[0])
+        what, fix = explain.explain(''.join(self._step_log))
+        messagebox.showwarning('Henkan: something went wrong', '%s\n\n%s' % (what, fix))
+
+    def easy_do_install(self):
+        self._fill_pkg_dest(self._editor_pick() or {})
+        self.install()
+        self.easy_done.set('After the Windows prompt and its window finish, open your VOCALOID editor: '
+                           'the singer is called "%s".' % self.v['pkg_name'].get())
 
     def _header(self):
         from u2v import __version__
@@ -833,6 +1116,8 @@ class App(tk.Tk):
     def log(self, s, tag=None):
         if tag is None and re.search(r'WARNING|warning:', s):
             tag = 'warn'
+        if self.runner.busy:
+            self._step_log.append(s)
         self.text.insert('end', s, tag)
         self.text.see('end')
 
@@ -841,6 +1126,7 @@ class App(tk.Tk):
 
     def set_busy(self, title):
         if title:
+            self._step_log = []
             self._busy = (title, time.monotonic())
             self.prog.configure(mode='indeterminate')
             self.prog.start(12)
@@ -890,6 +1176,7 @@ class App(tk.Tk):
             self.v['db_name'].set(ascii_name)
             self.v['db_path'].set(os.path.join(DEVKIT, ascii_name, ascii_name))
             self.scan()
+            self._easy_check()
 
     def pick_out(self):
         d = filedialog.askdirectory(title='Output folder for the DBTool files')
@@ -1402,7 +1689,7 @@ class App(tk.Tk):
         lang = 'en' if (self.v['lang'].get() == 'en' or self.detected_lang == 'en') else 'ja'
         self.runner.start(self._py(CLI, 'validate', out, '--lang', lang), 'Validating')
 
-    def build(self):
+    def build(self, then=None):
         out, db = self.v['out'].get(), self.v['db_path'].get()
         if not os.path.exists(os.path.join(out, 'dictionary.txt')):
             return messagebox.showwarning('Build', 'The output folder has no dictionary.txt, so it was not converted '
@@ -1419,7 +1706,8 @@ class App(tk.Tk):
                 '--language', self.v['db_lang'].get(), '--dbtool', self.v['dbtool'].get()]
         if not self.v['dbtool_hidden'].get():
             args.append('--show-dbtool')
-        self.runner.start(self._py(CLI, *args), 'Building the singer DB', done=self._built)
+        self.runner.start(self._py(CLI, *args), 'Building the singer DB',
+                          done=lambda code: (self._built(code), then() if (then and code == 0) else None))
 
     def _built(self, code):
         """A built DB is what the Pack tab packs next: point it there."""
@@ -1643,7 +1931,7 @@ class App(tk.Tk):
         if d:
             self.v['pkg_dest'].set(os.path.normpath(d))
 
-    def pack(self):
+    def pack(self, then=None):
         db = self.v['pkg_db'].get()
         if not db:
             db = self.v['db_path'].get()
@@ -1673,6 +1961,8 @@ class App(tk.Tk):
                             self.log('package: %s\n' % self.package_dir())
                     except Exception:                              # noqa: BLE001 - log only
                         pass
+                if then:
+                    then()
         self.runner.start(self._py(CLI, 'pack', *args), 'Packing the voicebank', done=done)
 
     @staticmethod

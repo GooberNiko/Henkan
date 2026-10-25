@@ -346,7 +346,8 @@ class Converter:
         x, ft = self.load(e.wav)
         dur = len(x) / TARGET_SR
         off, end = e.offset, e.end(dur)
-        if end - off < 0.05:
+        # a stop's release into silence ("k -") is often given ~30 ms: the silence after it is added below
+        if end - off < (0.025 if len(phs) == 2 and phs[1] == 'Sil' else 0.05):
             return None, 'region too short'
         pre = min(max(e.preutter, off + MIN_SEG), end - MIN_SEG)
         n = len(phs)
@@ -464,12 +465,13 @@ class Converter:
         for g in sorted(groups):
             have = {(k[1], k[2]) for k in cands if k[0] == g}
             for X, Y in sorted(exp - have):
-                made = None
-                if X == 'Sil' and Y not in P.VOWELS:
+                # English: the same recorded sound under its other spelling (kh / k, l0 / l) comes first
+                made = self._relabel_allophone(clips, cands, g, X, Y) if self.lang == 'en' else None
+                if made is None and X == 'Sil' and Y not in P.VOWELS:
                     made = self._synth_onset(clips, cands, g, Y)
-                elif X == 'Sil' and Y in P.SUSTAINED:
+                elif made is None and X == 'Sil' and Y in P.SUSTAINED:
                     made = self._synth_sustained(clips, g, Y, 'onset')
-                elif Y == 'Sil' and X in P.SUSTAINED:
+                elif made is None and Y == 'Sil' and X in P.SUSTAINED:
                     made = self._synth_sustained(clips, g, X, 'tail')
                 if made is None:
                     made = self._relabel(clips, cands, g, X, Y)
@@ -628,10 +630,117 @@ class Converter:
                             'subst %s %s<-%s %s' % (X, Y, x2, y2), c.mute_before, c.mute_after)
         return None
 
+    def _allophones(self, p):
+        """The other English spelling of p (kh for k, l for l0 ...), as a list; [] in Japanese."""
+        return [P.EN_ALLOPHONE[p]] if self.lang == 'en' and p in P.EN_ALLOPHONE else []
+
+    def _relabel_allophone(self, clips, cands, g, X, Y):
+        """English [kh Q] from the recorded [k Q], [Q l0] from [Q l] ...: the bank sang one sound, VOCALOID
+        English spells it two ways (aspirated / plain plosive, clear / dark l), and both should find it."""
+        xs, ys = [X] + self._allophones(X), [Y] + self._allophones(Y)
+        for x2 in xs:
+            for y2 in ys:
+                if (x2, y2) == (X, Y):
+                    continue
+                r = self._best(cands, g, x2, y2, clips)
+                if r is None:
+                    continue
+                c, i = clips[r[1]], r[2]
+                phns = list(c.phns)
+                phns[i], phns[i + 1] = X, Y
+                return Clip(c.entry, phns, c.start, c.end, list(c.bounds), list(c.detected),
+                            'allophone %s %s<-%s %s' % (X, Y, x2, y2), c.mute_before, c.mute_after)
+        return None
+
+    # -------------------------------------------------------------- English r-coloured vowels
+    def _wave(self, c):
+        """A clip's samples (a spliced clip's own audio, else its whole recording) and its features."""
+        if c.audio is not None:
+            return c.audio, audio.Features(c.audio, TARGET_SR)
+        return self.load(c.entry.wav)
+
+    def _rhotic_sources(self, g, have):
+        """{rhotic: its vowel} the bank can build in group g: the dictionary has it, and [V r] and @r exist."""
+        if self.lang != 'en' or not any('@r' in u for u in have):
+            return {}
+        return {R: V for R, V in P.EN_RHOTIC.items()
+                if (self.dict is None or R in self.dict) and (V, 'r') in have}
+
+    def _splice_rhotic(self, clips, cands, g, R, V, Y):
+        """[R Y] for an r-coloured vowel (Q@ = Q gliding into r): the bank's [V r] from the steady vowel into
+        the r, crossfaded into the r-coloured end of its [@r Y] (before a vowel, the r of its [r Y])."""
+        a = self._best(cands, g, V, 'r')
+        b = self._best(cands, g, 'r' if Y in P.VOWELS else '@r', Y)
+        if a is None or b is None:
+            return None
+        ca, cb = clips[a[1]], clips[b[1]]
+        (_, vb, ve), (_, rb, re_) = ca.segments()[a[2]:a[2] + 2]
+        (_, pb, pe), (_, yb, _) = cb.segments()[b[2]:b[2] + 2]
+        if ve - vb < 0.05 or pe - pb < 0.02:
+            return None
+        sr, ov = TARGET_SR, int(0.03 * TARGET_SR)
+        xa, fa = self._wave(ca)
+        xb, _ = self._wave(cb)
+        # ~0.2 s of the vowel first: VOCALOID crossfades from the held vowel into this unit there
+        head = audio.cut(xa, int(round(max(vb, ve - 0.22) * sr)), int(round((rb + 0.5 * (re_ - rb)) * sr)) + ov // 2)
+        t0 = pb + 0.5 * (pe - pb) if Y in P.VOWELS else max(pb, pe - 0.06)
+        start = int(round(t0 * sr)) - ov // 2
+        period = 1.0 / max(60.0, audio.mean_f0(fa, rb - 0.05, re_) or 100.0)
+        ref, best_d, best_r = head[-ov:], 0, -2.0
+        for d in range(0, int(period * sr) + 1, 4):
+            seg = audio.cut(xb, start + d, start + d + ov)
+            r = float(np.dot(ref, seg) / (np.linalg.norm(ref) * np.linalg.norm(seg) + 1e-9))
+            if r > best_r:
+                best_d, best_r = d, r
+        # a VC oto ("er k") may stop 10 ms into the closure: carry on with what the recording has after it
+        rest = audio.cut(xb, start + best_d, int(round(max(cb.end, yb + 0.08) * sr)) + best_d)
+        rest = rest * 10 ** (float(np.clip(audio.rms_db(head[-ov:]) - audio.rms_db(rest[:ov]), -9, 9)) / 20)
+        w = np.linspace(0, 1, ov)
+        y = np.concatenate([head[:-ov], head[-ov:] * (1 - w) + rest[:ov] * w, rest[ov:]]).astype(np.float32)
+        ty = (len(head) - ov + int(round(yb * sr)) - start - best_d) / sr
+        if not MIN_SEG < ty < len(y) / sr - MIN_SEG:
+            return None
+        return Clip(ca.entry, [R, Y], 0.0, len(y) / sr, [ty], [False], 'rhotic %s+%s' % (R, Y), audio=y)
+
+    def fill_rhotic(self, clips, cands, chosen):
+        """VOCALOID English's I@ e@ U@ O@ Q@ for banks that never recorded them (Arpasing: "aa r"). An
+        r-coloured vowel starts as its vowel, so [C Q@] is the bank's [C Q] and its held note is Q's; it ends
+        in r, so [Q@ t] is [Q r] spliced into [@r t]."""
+        self.rhotic_made = set()
+        for g in sorted({c.entry.group for c in clips}):
+            have = {(k[1], k[2]) for k in cands if k[0] == g and cands[k]}
+            for R, V in self._rhotic_sources(g, have).items():
+                want = [(X, V, X, R) for X, Y in sorted(have) if Y == V and X not in P.EN_RHOTIC]
+                want += [(Y, None, R, Y) for X, Y in sorted(have)
+                         if X == '@r' and Y not in P.VOWELS and Y not in P.EN_RHOTIC]
+                want += [(Y, None, R, Y) for X, Y in sorted(have) if X == 'r' and Y in P.VOWELS
+                         and Y not in P.EN_RHOTIC]
+                for _, src, X, Y in want:
+                    if (X, Y) in have:
+                        continue
+                    if src is not None:              # [C R] / [V2 R] / [Sil R]: the same unit as [C V]
+                        r = self._best(cands, g, X, src)
+                        c, i = clips[r[1]], r[2]
+                        phns = list(c.phns)
+                        phns[i], phns[i + 1] = X, Y
+                        made = Clip(c.entry, phns, c.start, c.end, list(c.bounds), list(c.detected),
+                                    'rhotic %s %s<-%s %s' % (X, Y, X, src), c.mute_before, c.mute_after,
+                                    audio=c.audio)
+                    else:
+                        made = self._splice_rhotic(clips, cands, g, R, V, Y)
+                    if made is None:
+                        continue
+                    clips.append(made)
+                    i = next(j for j in range(len(made.phns) - 1) if made.phns[j:j + 2] == [X, Y])
+                    chosen[len(clips) - 1].append(i)
+                    cands[(g, X, Y)].append((self.unit_score(made, i), len(clips) - 1, i))
+                    have.add((X, Y))
+                    self.rhotic_made.add((g, R))
+
     def _synth_onset(self, clips, cands, g, C):
         """[Sil C]: take C from a CV/VCV clip and silence everything before it."""
         best = None
-        for c2 in [C] + P.SUBST_CV.get(C, []):
+        for c2 in [C] + self._allophones(C) + P.SUBST_CV.get(C, []):
             for (gg, a, b), lst in cands.items():
                 if gg != g or a != c2 or b not in P.VOWELS:
                     continue
@@ -690,7 +799,8 @@ class Converter:
     def _cons_head(self, clips, cands, g, C):
         """Best recorded [C V] in group g: (clip, cons begin, cons end, vowel, vowel end) or None."""
         best = None
-        alts = [C] + P.SUBST_CV.get(C, []) + [q for q in P.SUBST.get(C, []) if q not in P.SUSTAINED]
+        alts = [C] + self._allophones(C) + P.SUBST_CV.get(C, []) \
+            + [q for q in P.SUBST.get(C, []) if q not in P.SUSTAINED]
         for k, c2 in enumerate(alts):    # dz/dZ may only exist as z/Z, t'/d' as t/d in CV banks
             for (gg, a, b), lst in cands.items():
                 if gg != g or a != c2 or b not in P.VOWELS:
@@ -987,7 +1097,11 @@ class Converter:
         def lvl(t):
             return audio.rms_db(x[max(0, int(t * sr)):max(0, int(t * sr)) + w])
         v = c.bounds[0]
-        quiet = audio.rms_db(x[int((v + 0.03) * sr):int((v + 0.1) * sr)]) - 25
+        if c.phns[1] == 'Sil':
+            # a stop into silence ("k -"): nothing follows to compare with, the closure is quiet next to its burst
+            quiet = audio.rms_db(x[max(0, int(c.start * sr)):int(max(v, c.start + 0.02) * sr)]) - 20
+        else:
+            quiet = audio.rms_db(x[int((v + 0.03) * sr):int((v + 0.1) * sr)]) - 25
         t = c.start
         if lvl(t) >= quiet:
             for _ in range(5):      # the offset may cut into the burst: step back over its onset first
@@ -1286,6 +1400,7 @@ class Converter:
                 chosen[ci].append(i)
         if self.fill:
             self.fill_missing(clips, cands, chosen)
+            self.fill_rhotic(clips, cands, chosen)
 
         # stationaries: the longest steady stretch of each sustained phoneme. Follow it through the
         # recording (oto regions stop early); VOCALOID loops this on long notes, so longer is smoother.
@@ -1393,6 +1508,11 @@ class Converter:
                 for n in sorted(P.NASAL - {'N\\'}):
                     if (g, n) not in final and (self.dict is None or n in self.dict):
                         jobs.append((g, n, 'N\\', final[(g, 'N\\')]))
+        # English r-coloured vowels hold their vowel (the r comes at the end of the note)
+        for g, R in sorted(getattr(self, 'rhotic_made', ())):
+            V = P.EN_RHOTIC[R]
+            if (g, R) not in final and (g, V) in final:
+                jobs.append((g, R, V, final[(g, V)]))
         nstat = 0
         seen_stat = {}  # vowels-only EVEC: shared consonants get one stationary (from the main colour)
         if self.evec_vowels_only:
@@ -1507,12 +1627,22 @@ class Converter:
             for a, b in zip(ph, ph[1:]):
                 if a not in P.SUSTAINED and b not in P.SUSTAINED and 'Sil' not in (a, b):
                     clusters.add((a, b))
+        # both spellings of every plosive and of l (kh / k, l0 / l): VOCALOID English types either
+        seen |= {P.EN_ALLOPHONE[p] for p in seen if p in P.EN_ALLOPHONE}
         if self.dict is not None:
             seen = {p for p in seen if p in self.dict}
         V = {p for p in seen if p in P.VOWELS}
         C = seen - V
-        exp = {('Sil', v) for v in V} | {(v, 'Sil') for v in V} | {('Sil', c) for c in C} | {(c, 'Sil') for c in C}
+        # ... except at a phrase end, which is never aspirated or clear: rock = r Q k, feel = f i: l
+        ends = {c for c in C if c not in P.EN_ALLOPHONE or c in P.EN_ASPIRATED or c == 'l'}
+        exp = {('Sil', v) for v in V} | {(v, 'Sil') for v in V} | {('Sil', c) for c in C} | {(c, 'Sil') for c in ends}
         exp |= {(c, v) for c in C for v in V} | {(v, c) for v in V for c in C} | {(a, b) for a in V for b in V}
+        # r-coloured vowels the bank can build (Q@ from Q, r and @r): into and out of everything
+        if 'r' in C and '@r' in V:
+            for R, v in P.EN_RHOTIC.items():
+                if v in V and (self.dict is None or R in self.dict):
+                    exp |= {(x, R) for x in C | V | {'Sil'} if x not in P.EN_RHOTIC}
+                    exp |= {(R, y) for y in C | V | {'Sil'} if y not in P.EN_RHOTIC}
         return exp | clusters
 
     def write_report(self, produced, groups, gid, n_art, n_stat, manifest=()):

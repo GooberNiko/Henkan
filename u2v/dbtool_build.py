@@ -29,6 +29,69 @@ class DBToolError(RuntimeError):
     pass
 
 
+SIDE_BY_SIDE = ('the DBTool (%s) cannot start: Windows says its "side-by-side configuration is incorrect", '
+                'which means the Microsoft Visual C++ 2008 runtime it was built with is not installed. Install '
+                'the "Microsoft Visual C++ 2008 Redistributable" x86 version (also on 64-bit Windows; the '
+                'DBTool is a 32-bit program), restart the PC and build again.')
+
+
+def _start_error(ex, exe):
+    """A DBToolError for the DBTool failing to start. Error 14001 (side-by-side) is a missing VC++ 2008
+    runtime, which Windows reports in words nobody can act on."""
+    if '14001' in str(ex) or 'side-by-side' in str(ex).lower():
+        return DBToolError(SIDE_BY_SIDE % exe)
+    return DBToolError('the DBTool (%s) cannot start: %s' % (exe, ex))
+
+
+def ansi_safe(path):
+    """The DBTool is an ANSI program: a path with characters outside this PC's Windows code page (a
+    Japanese bank name on a Portuguese PC, an accent on a Japanese one) never reaches it, and it then
+    quietly does nothing."""
+    try:
+        path.encode('mbcs', 'strict')
+    except LookupError:                           # not Windows
+        return True
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _short_path(path):
+    try:
+        import win32api
+        return win32api.GetShortPathName(path)
+    except Exception:                             # noqa: BLE001 - no 8.3 names on this drive
+        return path
+
+
+_SAFE_ROOT = []
+
+
+def safe_temp():
+    """A folder for the DBTool's working files whose path the DBTool can read."""
+    if _SAFE_ROOT:
+        return _SAFE_ROOT[0]
+    tmp = tempfile.gettempdir()
+    drive = os.environ.get('SystemDrive', 'C:') + os.sep
+    for d in (tmp, _short_path(tmp), os.path.join(os.environ.get('ProgramData', drive + 'ProgramData'), 'Henkan'),
+              os.path.join(drive, 'HenkanTemp')):
+        if not ansi_safe(d):
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.rmdir(tempfile.mkdtemp(dir=d))     # can we write there?
+        except OSError:
+            continue
+        _SAFE_ROOT.append(d)
+        return d
+    raise DBToolError('found no folder the DBTool can read (the temp folder %s has characters it cannot handle)'
+                      % tmp)
+
+
+def _mkdtemp(prefix):
+    return tempfile.mkdtemp(prefix=prefix, dir=safe_temp())
+
+
 def _decode(name):
     return re.sub(r'%(\d+)%', lambda m: chr(int(m.group(1))), name)
 
@@ -137,22 +200,25 @@ class DBTool:
         self.log = log
         self.hidden = desktop is not None
         self.seg_folder = os.path.abspath(seg_folder)
-        self.work = tempfile.mkdtemp(prefix='dbtool_')
+        self.work = _mkdtemp('dbtool_')
         shutil.copy(exe, self.work)
         with open(os.path.join(self.work, 'VocaloidDBTool.ini'), 'w', newline='\r\n') as f:
             f.write('[Segmentate Folder]\nWavefilePath=%s\nToolkitPath=%s\n[External Tool]\n'
                     'ExtWaveEditorPath=\nUseExtWaveEditor=0\nMasterVolume=0\n'
                     % (os.path.abspath(seg_folder), self.work))
         path = os.path.join(self.work, os.path.basename(exe))
-        if desktop is None:
-            self.app = Application(backend='win32').start(path, work_dir=self.work)
-        else:
-            import win32process
-            si = win32process.STARTUPINFO()
-            si.lpDesktop = desktop.path
-            _hp, _ht, pid, _tid = win32process.CreateProcess(None, '"%s"' % path, None, None, False, 0, None,
-                                                             self.work, si)
-            self.app = Application(backend='win32').connect(process=pid)
+        try:
+            if desktop is None:
+                self.app = Application(backend='win32').start(path, work_dir=self.work)
+            else:
+                import win32process
+                si = win32process.STARTUPINFO()
+                si.lpDesktop = desktop.path
+                _hp, _ht, pid, _tid = win32process.CreateProcess(None, '"%s"' % path, None, None, False, 0,
+                                                                 None, self.work, si)
+                self.app = Application(backend='win32').connect(process=pid)
+        except Exception as ex:
+            raise _start_error(ex, exe) from ex
         self.main = self._wait(lambda: [w for w in self.app.windows() if w.class_name().startswith('Afx')
                                         and w.menu() and w.menu().item_count()], 30, 'main window')[0]
 
@@ -223,6 +289,10 @@ class DBTool:
         """db_path: folder\\Name -> creates folder\\Name.dat, Name.tree and Name\\singer.inf."""
         self._menu(CMD_NEW_DB)
         self._file_dialog('Load Phonetic Dictionary file', os.path.abspath(dictionary))
+        try:
+            self._dialog('Singer database Path & Name', timeout=60)
+        except DBToolError as ex:
+            raise DBToolError('the DBTool did not take the phonetic dictionary %s (%s)' % (dictionary, ex))
         self._file_dialog('Singer database Path & Name', os.path.abspath(db_path))
         dlg = self._dialog('Select language')
         box = dlg.child_window(class_name='ComboBox').wrapper_object()
@@ -500,9 +570,35 @@ def build(exe, seg_folder, db_path, name=None, dictionary=None, language='Japane
     pitch the DBTool analysed for each unit is checked; units it read an octave off get their
     fundamental raised and the DB is built once more. hidden: run the DBTool out of sight."""
     dictionary = os.path.abspath(dictionary or os.path.join(seg_folder, 'dictionary.txt'))
+    seg_folder = os.path.abspath(seg_folder)
     if os.path.exists(os.path.abspath(db_path) + '.tree'):
         raise DBToolError('%s already exists; pick a new DB name' % db_path)
-    os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    final = os.path.abspath(db_path)
+    if not ansi_safe(os.path.basename(final)):
+        raise DBToolError('the DBTool cannot handle the DB name "%s": use plain letters and digits (A-Z, 0-9)'
+                          % os.path.basename(final))
+    os.makedirs(os.path.dirname(final), exist_ok=True)
+    stage = None
+    if not ansi_safe(final):
+        # the DBTool can't write there: build in a folder it can, and move the DB in afterwards
+        stage = _mkdtemp('dbtool_db_')
+        db_path = os.path.join(stage, os.path.basename(final))
+    try:
+        failed = _build_passes(exe, seg_folder, db_path, name, dictionary, language, log, hidden)
+    except DBToolHandoff:
+        raise
+    except BaseException:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+        raise
+    if stage:
+        for part in (db_path + '.dat', db_path + '.tree', db_path):
+            shutil.move(part, final + part[len(db_path):])
+        shutil.rmtree(stage, ignore_errors=True)
+    return failed
+
+
+def _build_passes(exe, seg_folder, db_path, name, dictionary, language, log, hidden):
     if hidden:
         log('the DBTool runs in the background (hidden), so you can keep using the PC')
     boosted = {}
@@ -523,6 +619,15 @@ def build(exe, seg_folder, db_path, name=None, dictionary=None, language='Japane
         _remove_db(db_path)
 
 
+def _copy_seg(seg_folder, work):
+    """The files of seg_folder only: a folder in it (often the source bank, saved next to the output) is
+    not the DBTool's, and copying one as a file fails on Windows with "Permission denied"."""
+    for fn in os.listdir(seg_folder):
+        src = os.path.join(seg_folder, fn)
+        if os.path.isfile(src):
+            shutil.copy(src, work)
+
+
 def _build_fresh(exe, seg_folder, db_path, name, dictionary, language, log, boosted, hidden):
     """One build, from a fresh copy of seg_folder: the DBTool rewrites files in the folder it builds from
     (stationary .wav/.as0, new .db0), which would break the next build. Out of sight first if hidden;
@@ -530,11 +635,13 @@ def _build_fresh(exe, seg_folder, db_path, name, dictionary, language, log, boos
     window ("Invalid window handle") starts over once."""
     plan = (['hidden'] if hidden else []) + ['shown', 'shown']
     for k, where in enumerate(plan):
-        work = tempfile.mkdtemp(prefix='dbtool_seg_')
+        work = _mkdtemp('dbtool_seg_')
         keep = False
         try:
-            for fn in os.listdir(seg_folder):
-                shutil.copy(os.path.join(seg_folder, fn), work)
+            _copy_seg(seg_folder, work)
+            if os.path.normcase(dictionary) != os.path.normcase(os.path.join(seg_folder, 'dictionary.txt')):
+                shutil.copy(dictionary, os.path.join(work, 'dictionary.txt'))
+            dictionary = os.path.join(work, 'dictionary.txt')     # a path the DBTool can read
             _boost(work, boosted)
             if where == 'hidden':
                 return _on_hidden_desktop(

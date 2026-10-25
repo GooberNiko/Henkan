@@ -133,11 +133,14 @@ MAIN_COLOR = re.compile(r'normal|standard|std|main|default|通常|ノーマル|�
 JA_FALLBACK = {"p\\'": 'p\\', 'h\\': 'h', "b'": 'b', 'v': 'b', "v'": "b'"}
 
 
+EN_FALLBACK = {'ph': 'p', 'th': 't', 'kh': 'k', 'bh': 'b', 'dh': 'd', 'gh': 'g', 'l0': 'l'}
+
+
 def fallback(p, have):
-    """p, or the closest phoneme `have` holds (v' -> b' -> b); p itself when nothing fits."""
+    """p, or the closest phoneme `have` holds (v' -> b' -> b, kh -> k); p itself when nothing fits."""
     q = p
-    while q not in have and q in JA_FALLBACK:
-        q = JA_FALLBACK[q]
+    while q not in have and (q in JA_FALLBACK or q in EN_FALLBACK):
+        q = JA_FALLBACK.get(q) or EN_FALLBACK[q]
     return q if q in have else p
 
 _KANA = """
@@ -331,15 +334,15 @@ ARPA = {
 
 
 def en_arpa_alias(alias):
-    toks = alias.lower().split()
+    toks = alias.split()
     if not 2 <= len(toks) <= 3:
         return None
     seq = []
     for t in toks:
-        if t in ('-', 'r', '_'):
+        if t in ('-', 'R', '_'):         # lowercase r is the consonant ("aa r", "r aa"), not a rest
             seq.append('Sil')
-        elif t in ARPA:
-            seq.append(ARPA[t])
+        elif t.lower() in ARPA:
+            seq.append(ARPA[t.lower()])
         else:
             return None
     if seq.count('Sil') == len(seq) or 'Sil' in seq[1:-1]:
@@ -391,8 +394,35 @@ def en_xsampa_alias(alias):
     return seq
 
 
+# VOCALOID English writes a plosive that starts a syllable aspirated (kiss = kh I s, big = bh I g, but
+# sky = s k aI, rock = r Q k) and l clear before a vowel (list = l0 I s t, feel = f i: l). Banks record one
+# sound for both: the alias says which one it is, and the other spelling is filled from the same recording.
+EN_ASPIRATED = {'p': 'ph', 't': 'th', 'k': 'kh', 'b': 'bh', 'd': 'dh', 'g': 'gh'}
+EN_ALLOPHONE = dict(EN_ASPIRATED, **{v: k for k, v in EN_ASPIRATED.items()}, l='l0', l0='l')
+EN_ONSET_GLIDES = {'l', 'r', 'w', 'j'}           # kh l0 i: n (clean), ph r eI (pray), kh w i: n (queen)
+# VOCALOID English's r-coloured vowels (are = Q@, for = f O@, here = h I@) and the vowel each starts as.
+# Arpasing banks never record them: they're built from the vowel, its [V r] and the bank's @r.
+EN_RHOTIC = {'Q@': 'Q', 'O@': 'O:', 'I@': 'I', 'e@': 'e', 'U@': 'U'}
+
+
+def en_context(seq):
+    """Aspirated plosives and clear l where VOCALOID English puts them: a plosive before a vowel or an
+    onset glide (or right after silence), not after s; l before a vowel or right after silence."""
+    out = list(seq)
+    for i, p in enumerate(seq):
+        prev = seq[i - 1] if i else None
+        nxt = seq[i + 1] if i + 1 < len(seq) else None
+        onset = nxt in VOWELS or (nxt is None and prev == 'Sil')
+        if p in EN_ASPIRATED and prev != 's' and (onset or nxt in EN_ONSET_GLIDES):
+            out[i] = EN_ASPIRATED[p]
+        elif p == 'l' and onset:
+            out[i] = 'l0'
+    return out
+
+
 def en_alias(alias):
-    return en_arpa_alias(alias) or en_xsampa_alias(alias)
+    seq = en_arpa_alias(alias) or en_xsampa_alias(alias)
+    return en_context(seq) if seq else seq
 
 
 # ------------------------------------------------------------------ language detection

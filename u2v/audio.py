@@ -117,8 +117,16 @@ class Features:
         # compensate the window's own decay
         wac = np.correlate(np.hanning(win), np.hanning(win), 'full')[win - 1:][lo:hi]
         acn = acn / (wac / wac[0])
-        self.period = np.clip(np.max(acn, axis=1), 0, 1)
-        self.lag = (np.argmax(acn, axis=1) + lo).astype(float)
+        best = np.max(acn, axis=1)
+        self.period = np.clip(best, 0, 1)
+        # A clean periodic sound correlates as well at 2, 3 ... periods as at one, and the window
+        # compensation tips those longer lags ahead: the shortest peak near the best is the period
+        # (a formant-synth bank read C4 as C3 and C5 as ~75 Hz)
+        pk = np.zeros_like(acn, dtype=bool)
+        pk[:, 1:-1] = (acn[:, 1:-1] >= acn[:, :-2]) & (acn[:, 1:-1] >= acn[:, 2:])
+        near = pk & (acn >= 0.9 * best[:, None])
+        first = np.where(near.any(axis=1), np.argmax(near, axis=1), np.argmax(acn, axis=1))
+        self.lag = (first + lo).astype(float)
         # log spectra (24 bands) for spectral change
         mag = np.abs(F[:, :nfft // 2])
         edges = band_edges(nfft)

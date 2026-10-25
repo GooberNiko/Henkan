@@ -659,7 +659,7 @@ def vvd_info(path):
 
 # ------------------------------------------------------------------ CompIDs and editors
 
-from .compid import (COMPID_RE, COMPID_ALPHABET, CompIDError, compids_in_use,  # noqa: F401
+from .compid import (COMPID_RE, COMPID_ALPHABET, CompIDError, compids_in_use, registered_name,  # noqa: F401
                      normalize as _normalize_compid, random_compid, status_of)
 
 
@@ -671,11 +671,14 @@ def new_compid(rng=None):
         raise PackError(str(ex)) from ex
 
 
-def check_compid(compid):
+def check_compid(compid, name=None):
+    """compid, normalized; raises PackError if malformed or taken. An ID registered to a bank of this same
+    name is that bank's own: repackaging an update reuses it."""
     ok, msg = status_of(compid)
-    if not ok:
+    cid = (compid or '').strip().upper()
+    if not ok and not (name and COMPID_RE.match(cid) and registered_name(cid) == name):
         raise PackError(msg)
-    return (compid or '').strip().upper()
+    return cid
 
 
 # editor kinds: reg roots are (files branch, mirror branch or None)
@@ -836,7 +839,7 @@ def make_package(db_path, out_dir=None, name=None, compid=None, db_version='4', 
     db_path = os.path.normpath(os.path.abspath(db_path))
     name = name or os.path.basename(db_path.rstrip('\\/')) or 'Singer'
     name = re.sub(r'[^A-Za-z0-9 _-]+', '_', name).strip() or 'Singer'
-    compid = check_compid(compid) if compid else new_compid()
+    compid = check_compid(compid, name) if compid else new_compid()
     if out_dir is None:
         out_dir = os.path.join(os.path.dirname(db_path), 'package')
     package = os.path.join(os.path.abspath(out_dir), compid)
@@ -876,7 +879,7 @@ def _package_files(package):
 def write_install_scripts(package, editor, dest=None, compid=None, name=None, db_version='4', log=print):
     """Write install.bat/uninstall.bat into the package. Returns (install_bat, dest)."""
     compid0, base, _got, info = _package_files(package)
-    compid = check_compid(compid) if compid else compid0
+    compid = check_compid(compid, name or info.get('name') or base) if compid else compid0
     if compid != compid0:
         log('warning: installing under a different CompID than the package folder name')
     name = name or info.get('name') or base
@@ -934,6 +937,13 @@ def write_dev_slot(editor_root, db_path, name=None, log=print):
     if not os.path.exists(db_path + '.tree'):
         raise PackError('%s.tree does not exist: build the singer DB first' % db_path)
     name = name or os.path.basename(db_path.rstrip('\\/')) or 'Singer'
+    # BankSelect is the language (0 Japanese, 1 English, 4 Chinese ...): the DB's singer.inf says which
+    bank = 0
+    try:
+        m = re.search(r'Language\s*=\s*"?(\w+)', open(os.path.join(db_path, 'singer.inf'), encoding='latin-1').read())
+        bank = {'japanese': 0, 'english': 1, 'korean': 2, 'spanish': 3, 'chinese': 4}.get(m.group(1).lower(), 0)
+    except (OSError, AttributeError):
+        pass
     slots = read_dev_slots(ini)
     n = max([s[0] for s in slots] + [-1]) + 1
     pcs = set()
@@ -941,10 +951,10 @@ def write_dev_slot(editor_root, db_path, name=None, log=print):
         pcs.add(int(m.group(1)))
     pc = max(pcs) + 1 if pcs else 0
     folder, tree = os.path.dirname(db_path), os.path.basename(db_path)
-    snippet = ('\r\n[VVoice %d]\r\nBankSelect = 1\r\nProgramChange = %d\r\nComponentID = "%016d"\r\n'
+    snippet = ('\r\n[VVoice %d]\r\nBankSelect = %d\r\nProgramChange = %d\r\nComponentID = "%016d"\r\n'
                'DBPath = "%s"\r\nDBName = "%s.tree"\r\nVVoiceName = "%s"\r\n'
                'Breathiness = 0\r\nBrightness = 0\r\nClearness = 0\r\nGenderFactor = 0\r\nOpening = 0\r\n'
-               % (n, pc, n + 1, folder, tree, name))
+               % (n, bank, pc, n + 1, folder, tree, name))
     work = os.path.join(os.path.dirname(db_path), 'devslot_%d' % n)
     os.makedirs(work, exist_ok=True)
     slot_file = os.path.join(work, 'slot.txt')

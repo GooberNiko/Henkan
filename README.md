@@ -38,22 +38,29 @@ click "Add Articulations" 790 times with your own human finger.
 
 1. Download the [latest release](https://github.com/GooberNiko/Henkan/releases/latest) and unzip it
    **inside your devkit folder** (next to `VocaloidDBTool3.exe`).
-2. `pip install -r requirements.txt`
-3. Double-click **`Henkan GUI.bat`**.
-4. Pick your UTAU bank → **Convert** → **Build DB**. Go make a sandwich. 🥪 (Building takes a few minutes.
-   The DBTool runs in the background on a hidden desktop and clicks itself, so you can keep using the PC.
-   If it gets stuck back there, the build runs again with the DBTool on screen: then hands off, it is not
-   haunted. Untick **Run the DBTool in the background** (or `build --show-dbtool`) to watch it work.)
-5. **Pack & Install** → your bank becomes a real voicebank in your VOCALOID editor.
+2. Have [Python 3](https://www.python.org/downloads/) (tick **Add python.exe to PATH** in the installer).
+3. Double-click **`Henkan GUI.bat`**. The first time, it installs what Henkan needs from `requirements.txt` by
+   itself.
+4. On the **★ Easy** tab: **Choose folder…** (your UTAU bank), check that step 2 is all green ✔, then press
+   **▶ Make my voicebank**. Go make a sandwich. 🥪 (It takes a few minutes. The DBTool runs in the
+   background on a hidden desktop and clicks itself, so you can keep using the PC. If it gets stuck back
+   there, it runs again with the DBTool on screen: then hands off, it is not haunted.)
+5. **Install** → your bank becomes a real voicebank in your VOCALOID editor.
+
+Something red in step 2? Its **Find it…** / **Install** button fixes it. Something failed? Henkan tells you
+what went wrong and what to do, in words.
 
 That's it. That's the README. …okay fine, there's more below.
 
 ## 🖥️ The window
 
-Four tabs, in the order you use them:
+It opens on **★ Easy**: pick the bank, see what's ready (✔) and what's missing (✘, with a button that
+fixes it), name the singer, one button for convert → build → pack, then Install. Every option has its usual
+default there. For everything else there are four more tabs, in the order you use them:
 
 | Tab | What it's for |
 |---|---|
+| **★ Easy** | The whole road in three steps and one button |
 | **① Convert** | Pick folders, then convert. The options fold into sections (**Processing**, **Extras & transitions**, **Voice colours**, **Fine-tuning**); a closed section still says what it's set to, so nothing hides from you |
 | **② Build singer DB** | Drives the DBTool, hidden in the background. When it's done, the Pack tab already points at the new DB |
 | **③ Pack & Install** | `.ddb` + `.ddi` + `.vvd`, a CompID, and an install into any VOCALOID editor on the PC |
@@ -228,6 +235,18 @@ Arpasing and X-SAMPA-style banks (e.g. Kasane Teto English: `wE`, `e d`, `- skl`
 English coverage checks and gap filling. Build with `--language English` (the GUI picks it for you when
 the bank looks English).
 
+VOCALOID English spells some sounds two ways, and the editor types both: a plosive that starts a
+syllable is **aspirated** (`kiss` = `kh I s`, `big` = `bh I g`, but `sky` = `s k aI`, `rock` = `r Q k`),
+and `l` before a vowel is the **clear** `l0` (`list` = `l0 I s t`, `feel` = `f i: l`). Henkan names each
+recording by where it sits (`k aa` → `[kh Q]`, `aa k` → `[Q k]`, `l aa` → `[l0 Q]`) and fills the other
+spelling from the same audio, so `ph th kh bh dh gh l0` all sing. In Arpasing, `r` is the consonant (`aa r`,
+`r aa`); only `-` (and `R`) is a rest.
+
+The editor also writes r-coloured vowels Arpasing never records: `are` = `Q@`, `for` = `f O@`, `here` =
+`h I@`, `there` = `D e@`, `cure` = `kh j U@`. Henkan builds them from what the bank has: each starts as its
+vowel (`[kh Q@]` is the bank's `[kh Q]`, and a held `Q@` holds `Q`), and ends in r (`[Q@ t]` is the bank's
+`aa r` glide spliced into its `er t`; before a vowel, into `r aa`). The report counts them as `rhotic`.
+
 ## 🧰 Requirements
 
 - Windows (the DBTool is a Windows program; `convert` alone runs anywhere)
@@ -321,6 +340,20 @@ next to it as `<folder>__orig`.
   build again on screen. If it gets stuck there too, it **leaves the DBTool open** and prints what to click:
   select every row → *Add Stationaries To Database* → *Optimize EpR Guides* → *Add Articulations To
   Database* → *Exit*. (Don't close the DBTool while the log says it's working.)
+- **"timed out waiting for Singer database Path & Name. On screen: [] ; []".** Fixed in the next version. The
+  DBTool is an old program that can only read paths written in your Windows language. A Japanese-named bank on a
+  Portuguese PC (or an accented folder on a Japanese one) made it quietly ignore its dictionary. Henkan now
+  gives it copies in a folder it can read and moves the finished DB to where you asked.
+- **`PermissionError: [Errno 13] Permission denied: '...\<a folder>'` / "Building the singer DB failed".**
+  Fixed in the next version. The output folder had another folder inside it (often the UTAU bank itself), and
+  the build tried to copy that folder like a file. Running as administrator doesn't help. Until you update,
+  move that folder out of the output folder.
+- **"Windows cannot find 'pythonw'".** Python isn't installed, or wasn't added to PATH. Install it from
+  python.org with **Add python.exe to PATH** ticked. The new `Henkan GUI.bat` says this itself, and it also
+  finds Python through the `py` launcher.
+- **"The application has failed to start because its side-by-side configuration is incorrect"
+  (VocaloidDBTool3.exe).** The DBTool needs the **Microsoft Visual C++ 2008 Redistributable, x86** version, even
+  on 64-bit Windows. Install it, restart the PC, build again.
 - **"VOCALOID4 is already running."** Yes. Yes it is. Close it, then render.
 - **The DBTool window is clicking by itself.** That's us: the background build got stuck and is running
   again where you can see it. Hands off the keyboard for a minute.
