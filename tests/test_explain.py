@@ -26,6 +26,11 @@ class Explain(unittest.TestCase):
                                 'no stationaries? Packing the voicebank failed (exit 1)')
         self.assertIn('stationar', title.lower())
 
+    def test_empty_segmentation_list(self):
+        title, _fix = E.explain('DBTool lists 0 files\nerror: the DBTool lists no files in its "Automatic '
+                                'Segmentation" window: it was given another folder than C:\\x')
+        self.assertIn('wrong folder', title)
+
     def test_unknown_shows_last_error_line(self):
         title, fix = E.explain('converting\nsomething odd\nValueError: bad thing happened\nmore output\n')
         self.assertIn('ValueError: bad thing happened', fix)

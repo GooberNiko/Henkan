@@ -36,6 +36,9 @@ KNOWN = [
      'Windows would not let Henkan open a file.',
      'Close anything that has the voicebank open (the DBTool, an editor, a folder window), then try again. '
      'If it names a folder, move that folder out of the output folder.'),
+    (r'lists no files',
+     'The DBTool opened the wrong folder, so it had no recordings to build from.',
+     'Press Make my voicebank again. If it happens again, post the log on r/VocaloidPort so it can be fixed.'),
     (r'timed out|got stuck|exited \(crashed\?\)',
      'The DBTool got stuck.',
      'Tick "Show the DBTool while it works" and press Make my voicebank again. Don\'t touch the mouse or '

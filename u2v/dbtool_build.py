@@ -23,6 +23,19 @@ CMD_NEW_DB, CMD_AUTO_SEG, CMD_EXIT = 470, 1136, 484
 LIST, ADD_STAT, OPT_EPR, ADD_ART = 1201, 1206, 1212, 1216
 COL_STAT_TO_ADD, COL_STAT_ADDED, COL_ART_TO_ADD, COL_ART_ADDED = 6, 7, 9, 13
 AUTO_DLG = 'Automatic Database Creation Dialog'
+# The two folder windows Automatic Segmentation opens, by the prompt the DBTool puts in them. Their title
+# comes from Windows and is translated ("Browse for Files or Folders", "Telusuri File atau Folder", ...).
+FOLDER_PROMPTS = ('select wavefile folder', 'select segmentation toolkit folder')
+BFFM_SETSELECTIONA = 0x400 + 102
+
+
+def folder_prompt(texts):
+    """0 (wave files) or 1 (toolkit) for a window showing these texts, None for any other window."""
+    for t in texts:
+        t = (t or '').strip().lower()
+        if t in FOLDER_PROMPTS:
+            return FOLDER_PROMPTS.index(t)
+    return None
 
 
 class DBToolError(RuntimeError):
@@ -122,6 +135,10 @@ def _finished(cell):
 
 class DBToolHandoff(DBToolError):
     """The automation got stuck; the DBTool is left open with its files so the user can finish by hand."""
+
+
+class NoFiles(DBToolError):
+    """The segmentation list came up empty: the DBTool read the wrong folder. Nothing to finish by hand."""
 
 
 class NoHiddenDesktop(DBToolError):
@@ -328,11 +345,42 @@ class DBTool:
             self.app.kill()
         shutil.rmtree(self.work, ignore_errors=True)
 
+    def _folder_window(self, vis):
+        """(window, 0 wave files / 1 toolkit) for a visible folder window of the DBTool, else None."""
+        for w in vis:
+            if w.class_name() != '#32770' or w.window_text() == AUTO_DLG:
+                continue
+            try:
+                k = folder_prompt([c.window_text() for c in w.children()])
+            except Exception:                     # noqa: BLE001 - the window went away meanwhile
+                continue
+            if k is not None:
+                return w, k
+        return None
+
+    def _set_folder(self, h, path):
+        """Select path in the folder window (BFFM_SETSELECTIONA, the string placed in the DBTool's memory).
+        The DBTool preselects the folder from its ini, but OK on anything else gives an empty list."""
+        import ctypes
+        from pywinauto.remote_memory_block import RemoteMemoryBlock
+        try:
+            data = ctypes.create_string_buffer(path.encode('mbcs'))
+            mem = RemoteMemoryBlock(self.app.window(handle=h).wrapper_object(), size=ctypes.sizeof(data) + 16)
+            try:
+                mem.Write(data)
+                self._gui.SendMessageTimeout(h, BFFM_SETSELECTIONA, 1, mem.Address(),
+                                             self._con.SMTO_ABORTIFHUNG, 5000)
+            finally:
+                mem.CleanUp()
+        except Exception:                         # noqa: BLE001 - the ini's preselection is still there
+            pass
+
     def _confirm_folder(self, dlg, path, what):
-        """OK a "Browse for Files or Folders" window. On some PCs a posted OK is ignored (no folder
-        selected yet): type the path in, press OK every way we can, and in the end wait for the user to
+        """OK a folder window ("Select wavefile folder"). On some PCs a posted OK is ignored (no folder
+        selected yet): select the folder, press OK every way we can, and in the end wait for the user to
         press it (the build used to give up after 25 s and close the DBTool)."""
         h = dlg.handle
+        self._set_folder(h, path)
         try:
             edits = [c for c in dlg.descendants() if c.class_name() == 'Edit' and c.is_visible()]
             if edits:
@@ -352,9 +400,9 @@ class DBTool:
                 if not self._gui.IsWindow(h) or not self._gui.IsWindowVisible(h):
                     return
         if self.hidden:                           # nobody can press it there: run again where it shows
-            raise DBToolError('the "Browse for Files or Folders" window (%s) would not close' % what)
-        self.log('>>> please press OK (or Enter) in the DBTool\'s "Browse for Files or Folders" window (%s: %s)'
-                 % (what, path))
+            raise DBToolError('the DBTool\'s folder window (%s) would not close' % what)
+        self.log('>>> please press OK (or Enter) in the DBTool\'s folder window "%s" (%s: %s)'
+                 % (FOLDER_PROMPTS[what == 'toolkit'].capitalize(), what, path))
         self._wait(lambda: not self._gui.IsWindow(h) or not self._gui.IsWindowVisible(h), 600,
                    'you to press OK in the folder window')
 
@@ -362,19 +410,18 @@ class DBTool:
         self._menu(CMD_AUTO_SEG)
         # Usually it asks for the wave-file folder, then the toolkit folder (both from the ini); some
         # DBTool installs skip those windows and open the list straight away. Handle whichever shows up.
-        asked = 0
+        # The folder windows are told apart by the DBTool's prompt in them, not their (translated) title.
         t0 = time.time()
         while True:
             vis = [w for w in self.app.windows() if w.is_visible()]
             if any(w.window_text() == AUTO_DLG for w in vis):
                 break
-            browse = [w for w in vis if w.window_text() == 'Browse for Files or Folders']
+            browse = self._folder_window(vis)
             if browse:
                 time.sleep(1)
-                k = min(asked, 1)
-                self._confirm_folder(self.app.window(handle=browse[0].handle), (self.seg_folder, self.work)[k],
+                w, k = browse
+                self._confirm_folder(self.app.window(handle=w.handle), (self.seg_folder, self.work)[k],
                                      ('wave files', 'toolkit')[k])
-                asked += 1
                 continue
             if not self._alive():
                 raise DBToolError('the DBTool exited while opening Automatic Segmentation')
@@ -385,8 +432,15 @@ class DBTool:
         self.dlg = self._dialog(AUTO_DLG, timeout=600)
         self.dlg_handle = self.dlg.handle
         self.lv = self.dlg.child_window(control_id=LIST).wrapper_object()
+        t0 = time.time()
         self.rows = self.lv.item_count()
+        while not self.rows and time.time() - t0 < 20:
+            time.sleep(1)
+            self.rows = self.lv.item_count()
         self.log('DBTool lists %d files' % self.rows)
+        if not self.rows:
+            raise NoFiles('the DBTool lists no files in its "Automatic Segmentation" window: it was given '
+                          'another folder than %s' % self.seg_folder)
 
     def _col(self, col, tries=10):
         """One list column. Reading another process's list view can fail while the DBTool redraws it."""
@@ -741,7 +795,8 @@ def _build(exe, seg_folder, db_path, name, dictionary, language, log, desktop=No
         step = 'Add Articulations To Database'
         failed = t.add_articulations()
     except DBToolError as ex:
-        if step.startswith(('Add', 'Optimize', 'opening')) and t._alive() and not t.hidden:
+        if (step.startswith(('Add', 'Optimize', 'opening')) and t._alive() and not t.hidden
+                and not isinstance(ex, NoFiles)):
             # Leave the DBTool open on its list (and its files in place): the user can finish by hand.
             # Closing it here used to delete the folder it was building from, so that failed too.
             # (Out of sight nobody could: it is closed and the build runs again where it shows.)
