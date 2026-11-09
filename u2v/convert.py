@@ -36,9 +36,11 @@ class Converter:
     def __init__(self, bank, out, lang='auto', dict_path=None, groups=None, keep=1, derive=True,
                  merge=False, fill=True, log=print, evec=True, splice=True, extend_dict=True,
                  normalize=True, colors='main', brighten=None, avoid=(), extras=True,
-                 evec_map=None, evec_phonemes=None, custom_extras=None, evec_mode='full', v_mode='auto'):
+                 evec_map=None, evec_phonemes=None, custom_extras=None, evec_mode='full', v_mode='auto',
+                 triphones=False):
         self.bank, self.out, self.keep, self.derive, self.log = bank, out, keep, derive, log
         self.fill, self.splice, self.normalize = fill, splice, normalize
+        self.triphones = triphones                           # also keep VCV recordings whole, as [V C V]
         self.brighten = brighten or {}                       # {phoneme: dB of treble above 2 kHz}
         self.avoid = {tuple(u.split()) for u in avoid}       # units not to take from recordings
         self.colors = 'merge' if merge else colors          # main | evec | merge
@@ -1232,6 +1234,45 @@ class Converter:
         return dbtool_io.ArtSeg([c.phns[i], c.phns[i + 1]], 0, n, b,
                                 [self.voiced(c.phns[i]), self.voiced(c.phns[i + 1])])
 
+    # -------------------------------------------------------------- triphones
+    def _triphone_takes(self, clips, cands):
+        """[(clip)] to keep whole as [V C V], the best `keep` per unit and group: recorded VCV entries
+        both of whose diphones passed the checks that decide what a recording may be used for."""
+        usable = {(ci, i) for lst in cands.values() for _, ci, i in lst}
+        takes = defaultdict(list)
+        for ci, c in enumerate(clips):
+            if c.derived or c.audio is not None or len(c.phns) != 3 or not {(ci, 0), (ci, 1)} <= usable:
+                continue
+            first, mid, last = c.segments()
+            if (first[0] not in P.VOWELS or last[0] not in P.VOWELS or mid[0] in P.VOWELS or mid[0] in P.SIL
+                    or mid[0] in self.extra_phonemes() or min(first[2] - first[1], last[2] - last[1]) < 0.06):
+                continue
+            takes[(c.entry.group,) + tuple(c.phns)].append((self.unit_score(c, 0) + self.unit_score(c, 1), ci))
+        return [clips[ci] for _, lst in sorted(takes.items())
+                for _s, ci in sorted(lst, key=lambda r: -r[0])[:self.keep]]
+
+    def _write_triphone(self, c, base, targets):
+        """One file for a whole [V C V]. Not the diphones' file: that one may have the release muted
+        (_mute_release) when its [C V] came from another recording. Returns the phonemes as written."""
+        x = self.load(c.entry.wav)[0]
+        sx = self.suffixer(c.entry.group)
+        a, b = int(round(c.start * TARGET_SR)), int(round(c.end * TARGET_SR))
+        y = self._silent_closures(c, x, audio.cut(x, a, b))
+        y = self._devoice_breath(c, y)
+        y = self._brighten(c.segments(), c.start, y)
+        if targets:
+            y = y * self.gain_curve(c, x, targets, len(y))
+        audio.write_wav(base + '.wav', y, TARGET_SR)
+        phs = [sx(p) for p in c.phns]
+        segs = [(sx(p), s - c.start, e - c.start) for p, s, e in c.segments()]
+        segs[-1] = (segs[-1][0], segs[-1][1], (b - a) / TARGET_SR)
+        dbtool_io.write_seg(base + '.seg', segs)
+        dbtool_io.write_trans(base + '.trans', phs, [(phs, 1)])
+        left, right = self.art_seg(c, 0, x), self.art_seg(c, 1, x)
+        voiced = [self.voiced(c.phns[0]), self.voiced(c.phns[1]), self.voiced(c.phns[1]), self.voiced(c.phns[2])]
+        dbtool_io.write_as(base + '.as0', dbtool_io.ArtSeg(phs, 0, b - a, left.boundaries + right.boundaries[1:], voiced))
+        return phs
+
     # -------------------------------------------------------------- main
     def _rank_stationary(self, clips, joins, g, p, lst):
         """Order stationary candidates [(len, clip, begin, end)]: the held sound should match the units
@@ -1495,6 +1536,16 @@ class Converter:
                                  'yes' if c.detected[i] else 'oto', c.derived])
             dbtool_io.write_trans(base + '.trans', [sx(p) for p in c.phns], dirs)
 
+        if self.triphones:
+            for c in self._triphone_takes(clips, cands):
+                nfile += 1
+                name = '%s_%05d' % (gid[c.entry.group], nfile)
+                phs = self._write_triphone(c, os.path.join(self.out, name), targets)
+                f0 = audio.mean_f0(self.load(c.entry.wav)[1], c.bounds[0] - 0.1, c.bounds[1] + 0.1)
+                manifest.append([name, 'art', ' '.join(phs), c.entry.group, c.entry.raw_alias,
+                                 os.path.relpath(c.entry.wav, self.bank), '%.1f' % f0,
+                                 'yes' if all(c.detected) else 'oto', 'triphone'])
+
         joins = self._join_spectra(clips, chosen)
         final = {}
         for (g, p), lst in sorted(stat.items()):
@@ -1648,12 +1699,15 @@ class Converter:
     def write_report(self, produced, groups, gid, n_art, n_stat, manifest=()):
         exp = self.expected_units()
         made = defaultdict(lambda: defaultdict(int))
+        n_tri = sum(1 for row in manifest if row[8] == 'triphone')
         for row in manifest:
-            if row[1] == 'art':
+            if row[1] == 'art' and row[8] != 'triphone':
                 made[row[3]][row[8].split(' ')[0] if row[8] else 'recorded'] += 1
         lines = ['UTAU -> VOCALOID3 DBTool conversion report', '',
                  'bank: %s' % self.bank, 'language: %s' % self.lang,
-                 'articulation units: %d, stationaries: %d' % (n_art, n_stat)]
+                 'articulation units: %d, stationaries: %d' % (n_art - n_tri, n_stat)]
+        if n_tri:
+            lines.append('triphones: %d (VCV recordings kept whole as [V C V], next to their diphones)' % n_tri)
         if getattr(self, 'n_closure', 0):
             lines.append('CV entries whose offset cut into the consonant (closure, nasal murmur), start moved back: %d'
                          % self.n_closure)

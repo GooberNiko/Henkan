@@ -89,6 +89,9 @@ def main():
                    help="ヴ (va, vi, vu ...): 'v' gives it its own phonemes v and v' (before i), 'b' sings it "
                         "as b / b' like the stock Japanese dictionary, 'auto' (default) = v when the bank "
                         "recorded any ヴ")
+    c.add_argument('--triphones', action='store_true',
+                   help='also keep each VCV recording whole as one [V C V] unit, next to the usual diphones '
+                        '(a bigger DB and a longer build)')
     c.add_argument('--list-unknown', action='store_true',
                    help='list bank aliases that map to nothing (candidates for --custom-extra) and exit')
     c.add_argument('--avoid', action='append', default=[], metavar='"C V"',
@@ -271,7 +274,8 @@ def main():
                                      brighten={k: float(v) for k, v in (b.split('=') for b in a.brighten)},
                                      avoid=a.avoid, extras='none' if a.no_extras else a.extras,
                                      evec_map=a.evec_map, evec_phonemes=a.evec_phonemes,
-                                     custom_extras=a.custom_extra, evec_mode=a.evec_mode, v_mode=a.v_mode)
+                                     custom_extras=a.custom_extra, evec_mode=a.evec_mode, v_mode=a.v_mode,
+                                     triphones=a.triphones)
         except ValueError as ex:             # a bad option value (old --extras br1, a typo in a spec ...)
             print('error: %s' % ex)
             return 2

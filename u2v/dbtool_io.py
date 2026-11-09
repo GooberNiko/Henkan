@@ -141,8 +141,13 @@ def patch_evec_names(db_path):
     return n
 
 
+def art_key(parts):
+    """The phonemes of an articulation from its path in a DB: the DBTool files a triphone under a/^k/a."""
+    return tuple(p[1:] if i == 1 and len(parts) == 3 and p.startswith('^') else p for i, p in enumerate(parts))
+
+
 def db_pitches(db_path):
-    """The pitch the DBTool analysed for every unit of a built DB: {('art', p1, p2) | ('stat', p):
+    """The pitch the DBTool analysed for every unit of a built DB: {('art', p1, p2, ...) | ('stat', p):
     median first-harmonic frequency (Hz) of the unit's frames}. Each FRM2 frame holds its partials'
     frequencies (u32 count at +28, f32 frequencies from +32)."""
     import os
@@ -169,7 +174,7 @@ def db_pitches(db_path):
                 if not f1:
                     continue
                 parts = [name(x) for x in os.path.relpath(os.path.join(dp, fn), base).split(os.sep)]
-                k = ('art',) + tuple(parts) if key == 'art' else ('stat', parts[1] if len(parts) > 2 else parts[0])
+                k = ('art',) + art_key(parts) if key == 'art' else ('stat', parts[1] if len(parts) > 2 else parts[0])
                 out[k] = float(np.median(f1))
     return out
 

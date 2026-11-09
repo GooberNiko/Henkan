@@ -137,6 +137,14 @@ class DBToolHandoff(DBToolError):
     """The automation got stuck; the DBTool is left open with its files so the user can finish by hand."""
 
 
+class DBToolFrozen(DBToolError):
+    """The DBTool is running but no longer answers Windows. Worth one more try from the start."""
+
+
+FROZEN = ('the DBTool stopped responding right after opening %s. Your dictionary is not the problem (the DBTool '
+          'accepts any file at this step): the DBTool itself froze on this PC')
+
+
 class NoFiles(DBToolError):
     """The segmentation list came up empty: the DBTool read the wrong folder. Nothing to finish by hand."""
 
@@ -243,6 +251,14 @@ class DBTool:
     def _alive(self):
         return self.app.is_process_running()
 
+    def _responding(self):
+        """Does the DBTool still answer Windows? A frozen one is alive, but its windows all read as untitled."""
+        try:
+            self._gui.SendMessageTimeout(self.main.handle, self._con.WM_NULL, 0, 0, self._con.SMTO_ABORTIFHUNG, 3000)
+        except Exception:                         # noqa: BLE001 - pywintypes.error: hung, or the window is gone
+            return False
+        return True
+
     def _wait(self, cond, timeout, what, poll=0.5):
         t = time.time()
         while time.time() - t < timeout:
@@ -307,9 +323,11 @@ class DBTool:
         self._menu(CMD_NEW_DB)
         self._file_dialog('Load Phonetic Dictionary file', os.path.abspath(dictionary))
         try:
-            self._dialog('Singer database Path & Name', timeout=60)
+            self._dialog('Singer database Path & Name', timeout=180)
         except DBToolError as ex:
-            raise DBToolError('the DBTool did not take the phonetic dictionary %s (%s)' % (dictionary, ex))
+            if self._alive() and not self._responding():
+                raise DBToolFrozen(FROZEN % dictionary) from ex
+            raise DBToolError('the DBTool did not open its next window after %s (%s)' % (dictionary, ex)) from ex
         self._file_dialog('Singer database Path & Name', os.path.abspath(db_path))
         dlg = self._dialog('Select language')
         box = dlg.child_window(class_name='ComboBox').wrapper_object()
@@ -535,9 +553,11 @@ class DBTool:
                 raise DBToolError('timed out during: %s' % what)
 
     def _db_units(self, kind):
-        """Units already written to the DB folder: {pair or phoneme: (bytes, mtime)}. The DBTool writes one
-        file per unit (voice/articulation/<p1>/<p2>, voice/stationary/normal/<p>/<n>), so this shows
-        progress without reading its window (which fails on some PCs and is slow for big banks)."""
+        """Units already written to the DB folder: {phonemes or phoneme: (bytes, mtime)}. The DBTool writes
+        one file per unit (voice/articulation/<p1>/<p2>, a triphone /<p1>/^<p2>/<p3>,
+        voice/stationary/normal/<p>/<n>), so this shows progress without reading its window (which fails
+        on some PCs and is slow for big banks)."""
+        from . import dbtool_io
         base = os.path.join(self.db_path, 'voice', kind)
         out = {}
         for dp, _, files in os.walk(base):
@@ -546,7 +566,7 @@ class DBTool:
                     continue
                 f = os.path.join(dp, fn)
                 parts = [_decode(x) for x in os.path.relpath(f, base).split(os.sep)]
-                key = tuple(parts) if kind == 'articulation' else parts[1] if len(parts) > 2 else parts[0]
+                key = dbtool_io.art_key(parts) if kind == 'articulation' else parts[1] if len(parts) > 2 else parts[0]
                 try:
                     st = os.stat(f)
                 except OSError:
@@ -706,6 +726,10 @@ def _build_fresh(exe, seg_folder, db_path, name, dictionary, language, log, boos
             raise
         except NoHiddenDesktop as ex:
             log('no hidden desktop for the DBTool (%s): it runs where you can see it' % ex)
+        except DBToolFrozen as ex:
+            if k == len(plan) - 1:
+                raise
+            log('%s\n>>> closing it and starting the build again.' % ex)
         except DBToolError as ex:
             if where != 'hidden':
                 raise

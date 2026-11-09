@@ -74,6 +74,7 @@ articulation asr segmentation
 * For a diphone, begin and end are marks inside the 1st and 2nd phoneme, and note align is the transition between them.
 
 **V3 `nphone art segmentation`** (`phns: [...]`, `boundaries: [...]`, `voiced: [...]`; 2n-1 boundaries and 2n-2 voiced flags, or 2/1 for n=1).
+**Use it for triphones** (`phns: ["a", "k", "a"]`, boundaries: mark in `a`, a→k, mark in `k`, k→a, mark in the last `a`). The DBTool adds these and files them under `voice/articulation/a/^k/a`.
 **Avoid it for stationaries.** Verified with Frida: the tool's list parser (0x5fd6a0) leaves the phoneme name unterminated (`"aý4"`). The phoneme id then becomes -1, the tree node gets a NULL name, and "Add Stationaries To Database" crashes in the tree save (0x426be8).
 
 Common fields:

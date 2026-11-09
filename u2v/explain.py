@@ -19,6 +19,11 @@ KNOWN = [
      'Press Make my voicebank again with "Show the DBTool while it works" ticked and watch the Automatic '
      'Segmentation window: the Stationaries column should fill in. If it stays empty, post the log on '
      'r/VocaloidPort so it can be fixed.'),
+    (r'stopped responding',
+     'The DBTool froze on this PC.',
+     'Your dictionary is fine, so there is no need to change it. Restart the PC, close cloud-drive apps (they '
+     'hook into file windows, and this is where it froze) and pause your antivirus, then tick "Show the DBTool '
+     'while it works" and try again. If it freezes again, post the log on r/VocaloidPort so it can be fixed.'),
     (r'phonetic dictionary|no dictionary\.txt',
      'Henkan could not find the phonetic dictionary.',
      'It comes with the VOCALOID3 devkit (Japanese Dictionary\\Japanese_Dictionary.txt). Press "Find it…" '

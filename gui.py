@@ -26,7 +26,7 @@ sys.path.insert(0, ROOT)
 
 
 SAVED = ('bank', 'out', 'dict', 'lang', 'colors', 'keep', 'splice', 'fill', 'normalize', 'derive', 'extend_dict',
-         'extras', 'evec_map', 'evec_phonemes', 'custom_extras', 'evec_vowels', 'v_mode',
+         'extras', 'evec_map', 'evec_phonemes', 'custom_extras', 'evec_vowels', 'v_mode', 'triphones',
          'merge_groups', 'brighten', 'avoid', 'db_name', 'db_path', 'db_lang', 'dbtool', 'dbtool_hidden',
          'pkg_db', 'pkg_name', 'pkg_compid', 'pkg_out', 'pkg_editor', 'pkg_dest', 'pkg_devini',
          'v3v2_name', 'v3v2_lang', 'sections', 'geometry', 'tab')
@@ -201,7 +201,7 @@ class App(tk.Tk):
                       extend_dict=B(value=True), merge_groups=B(value=False), extras=B(value=True),
                       brighten=S(), avoid=S(), evec_map=S(), evec_phonemes=S(),
                       custom_extras=S(), evec_vowels=B(value=False), v_mode=S(value=V_MODE_LABELS[0]),
-                      sections=S(value='extras'), geometry=S(), tab=S(value='0'),
+                      triphones=B(value=False), sections=S(value='extras'), geometry=S(), tab=S(value='0'),
                       db_name=S(), db_path=S(), db_lang=S(value='Japanese'),
                       pkg_db=S(), pkg_name=S(), pkg_compid=S(), pkg_out=S(), pkg_editor=S(),
                       pkg_dest=S(), pkg_devini=B(value=False),
@@ -694,7 +694,8 @@ class App(tk.Tk):
         s = self._section(r, 2, 'processing', 'Processing').body
         checks = [('splice', 'Fake missing transitions (CV legato)'), ('fill', 'Fill missing units'),
                   ('normalize', 'Even out loudness'), ('derive', 'Units from silence'),
-                  ('extend_dict', "Add b, b', p\\' to dictionary"), ('merge_groups', 'Treat folders as one set')]
+                  ('extend_dict', "Add b, b', p\\' to dictionary"), ('merge_groups', 'Treat folders as one set'),
+                  ('triphones', 'Keep VCV whole too (triphones: bigger DB)')]
         for i, (k, t) in enumerate(checks):
             ttk.Checkbutton(s, text=t, variable=self.v[k]).grid(row=i // 2, column=i % 2, sticky='w',
                                                                 padx=(0, 24), pady=1)
@@ -741,7 +742,7 @@ class App(tk.Tk):
                                                                                        'report.txt'))).pack(side='left')
         ttk.Button(b, text='Open folder', command=lambda: self.open_file(self.v['out'].get())).pack(side='left', padx=6)
 
-        for k in ('splice', 'fill', 'normalize', 'derive', 'extend_dict', 'merge_groups', 'extras', 'custom_extras', 'evec_map', 'evec_vowels', 'evec_phonemes', 'colors', 'brighten', 'avoid'):
+        for k in ('splice', 'fill', 'normalize', 'derive', 'extend_dict', 'merge_groups', 'triphones', 'extras', 'custom_extras', 'evec_map', 'evec_vowels', 'evec_phonemes', 'colors', 'brighten', 'avoid'):
             self.v[k].trace_add('write', lambda *_a: self._summaries())
         self._summaries()
         return f
@@ -758,6 +759,8 @@ class App(tk.Tk):
         bits = ['all on' if not off else 'off: ' + ', '.join(off)]
         if v['merge_groups'].get():
             bits.append('folders merged')
+        if v['triphones'].get():
+            bits.append('triphones')
         self.sections['processing'].summary.set(' · '.join(bits))
         try:
             from u2v import select as _SelS
@@ -1592,6 +1595,8 @@ class App(tk.Tk):
                 args.append(flag)
         if v['merge_groups'].get():
             args.append('--merge-groups')
+        if v['triphones'].get():
+            args.append('--triphones')
         _em = v['evec_map'].get().strip()
         _ep = v['evec_phonemes'].get().strip()
         if _em or _ep:

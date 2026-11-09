@@ -26,7 +26,7 @@ click "Add Articulations" 790 times with your own human finger.
 
 **Jump to:** [Quick start](#-quick-start-the-i-just-want-it-to-sing-path) ·
 [The window](#%EF%B8%8F-the-window) · [Extras](#%EF%B8%8F-extras--transitions-breaths-rolled-r-end-breaths-anything) ·
-[ヴ](#🅥-ヴ-gets-a-real-v-v-and-v) · [Voice colours](#-voice-colours-evec) ·
+[ヴ](#🅥-ヴ-gets-a-real-v-v-and-v) · [Triphones](#-triphones-keep-a-vcv-recording-whole) · [Voice colours](#-voice-colours-evec) ·
 [Pack & Install](#-pack--install-tab-3-your-bank-in-a-real-editor) ·
 [V3→V2](#-v3v2-backport-tab-4-your-v3v4-banks-in-vocaloid2) ·
 [Command line](#%EF%B8%8F-command-line-for-people-who-think-guis-are-for-cowards) ·
@@ -144,6 +144,16 @@ The GUI's **ヴ sings as** box (Convert tab), or `--v-mode`:
 - `auto` (default) — `v` / `v'` if the bank has any ヴ, otherwise nothing changes
 - `v` — always `v` / `v'`
 - `b` — the old way: ヴ is `b` / `b'`
+
+## 🧬 Triphones (keep a VCV recording whole)
+
+By default a VCV sample like `a か` (`a k a`) is cut into the diphones `[a k]` and `[k a]`. Tick **Keep VCV whole
+too** (Convert tab, Processing) or pass `--triphones`, and each VCV recording also goes in as one `[a k a]` unit, so
+the whole sound of that vowel-consonant-vowel stays together.
+
+The diphones stay too: everything else a song needs (phrase starts, ん, CV joins) is still built from them. Only
+real recordings count: spliced, borrowed and breath units never become triphones. Expect a bigger DB and a longer
+build, and the report says how many went in.
 
 ## 🎨 Voice colours (EVEC)
 
@@ -305,6 +315,7 @@ Useful `convert` options:
 | `--custom-extra "ALIAS=PH:GROUP[:end]"` | custom extra, repeatable: `cough=ch:UnvoicedPlosives`, `a R=hh:Breaths:end` (see Extras & transitions) |
 | `--list-unknown` | list aliases mapping to nothing (custom-extra candidates) and exit |
 | `--v-mode auto\|v\|b` | ヴ as its own `v` / `v'` (`auto`: when the bank recorded it) or as `b` / `b'` |
+| `--triphones` | also keep each VCV recording whole as one `[V C V]` unit, next to the diphones |
 | `--no-splice` | don't fake missing transitions |
 | `--no-fill` | don't relabel / mute / fade to fill missing units |
 | `--no-normalize` | keep each recording's own loudness |
