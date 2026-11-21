@@ -1,0 +1,471 @@
+"""UTAU alias -> VOCALOID phoneme sequence (Japanese kana/romaji VCV/CVVC, English Arpasing)."""
+import re
+
+# ------------------------------------------------------------------ phoneme classes
+
+SIL = {'Sil', '?', 'Asp'}
+VOWELS = {'a', 'i', 'M', 'e', 'o', 'u',
+          'I', 'e', '{', 'Q', 'V', 'U', '@', 'i:', 'u:', 'O:', '@r', 'eI', 'aI', 'OI', '@U', 'aU',
+          'I@', 'e@', 'U@', 'O@', 'Q@', '@l', 'e@0', 'A', 'aj', 'aw', 'ej'}
+UNV_PLOSIVE = {'p', "p'", 't', "t'", 'k', "k'", 'ph', 'th', 'kh'}
+UNV_FRIC = {'s', 'S', 'C', 'p\\', "p\\'", 'h', 'f', 'T', 'x', 'X'}
+UNV_AFFR = {'ts', 'tS'}
+V_PLOSIVE = {'b', "b'", 'd', "d'", 'g', "g'", 'bh', 'dh', 'gh'}
+V_FRIC = {'z', 'Z', 'dz', 'dZ', 'v', 'D', 'h\\'}
+NASAL = {'n', 'N', "N'", 'J', 'N\\', 'm', "m'"}
+LIQUID = {'4', "4'", 'l', 'l0', 'r', 'R', 'rr'}
+SEMI = {'w', 'j'}
+SUSTAINED = VOWELS | {'N\\'}          # get stationaries
+
+# The one built-in extra: vowel endings, "a R" -> [a Sil]. Breaths, a rolled r, the breath after a vowel,
+# a laugh ... are custom extras: you map their aliases to phonemes of your own (--custom-extra, or the GUI's
+# Custom extras window), and an alias that starts with a vowel ("a R", "a R息") keeps its transition.
+EXTRA_FOLDER = re.compile(r'extra|エクストラ|おまけ|息|吸|breath|ブレス', re.I)
+
+TYPICAL_DUR = {}
+for _s, _d in ((UNV_PLOSIVE, .07), (UNV_FRIC, .10), (UNV_AFFR, .10), (V_PLOSIVE, .05), (V_FRIC, .07),
+               (NASAL, .06), (LIQUID, .03), (SEMI, .05)):
+    for _p in _s:
+        TYPICAL_DUR[_p] = _d
+TYPICAL_DUR['h'] = .08
+TYPICAL_DUR['N\\'] = .12
+
+EXTRA_CHOICES = ['vend']
+# built in up to 1.0.5: now custom extras. --extras with one of these says how to map it instead.
+REMOVED_EXTRAS = {'br1': '息1=br1:Breaths', 'br2': '息2=br2:Breaths', 'br3': '息3=br3:Breaths',
+                  'br4': '息4=br4:Breaths', 'br5': '息5=br5:Breaths', 'br': '息1=br1:Breaths',
+                  'brE': 'a R息=brE:Breaths:end', 'brI': 'a R吸=brI:Breaths', 'rr': '巻=rr:Liquids',
+                  'hh': 'a R=hh:Breaths:end'}
+
+
+def extra_kind(phs):
+    """Which built-in extra a mapped extra sequence is (only vowel endings are built in)."""
+    return 'vend'
+
+
+def parse_extras_want(spec):
+    """'vend', 'all' or 'none' -> set of EXTRA_CHOICES. None = all."""
+    if spec is None or spec is True:
+        return None
+    if spec is False:
+        return set()
+    toks = list(spec) if isinstance(spec, (set, list, tuple)) else re.split(r'[,;\s]+', str(spec).strip())
+    out = set()
+    for t in toks:
+        t = t.strip()
+        if not t:
+            continue
+        tl = t.lower()
+        if tl in ('all', '*'):
+            return None
+        if tl in ('none', 'off', 'no'):
+            return set()
+        if tl in EXTRA_CHOICES:
+            out.add(tl)
+        elif t in REMOVED_EXTRAS or tl in REMOVED_EXTRAS:
+            raise ValueError('%s is not built in any more: map it as a custom extra, e.g. --custom-extra "%s"'
+                             % (t, REMOVED_EXTRAS.get(t) or REMOVED_EXTRAS[tl]))
+        else:
+            raise ValueError("unknown extra %r (choose from %s)" % (t, ', '.join(EXTRA_CHOICES)))
+    return out
+
+
+def pclass(ph):
+    if ph in SIL:
+        return 'sil'
+    if ph in VOWELS:
+        return 'vowel'
+    if ph in UNV_PLOSIVE:
+        return 'uplos'
+    if ph in UNV_FRIC or ph in UNV_AFFR:
+        return 'ufric'
+    if ph in V_PLOSIVE:
+        return 'vplos'
+    if ph in NASAL or ph in LIQUID or ph in SEMI or ph in V_FRIC:
+        return 'vcons'
+    return 'vcons'
+
+
+def is_unvoiced(ph):
+    return pclass(ph) in ('sil', 'uplos', 'ufric')
+
+
+# ------------------------------------------------------------------ Japanese
+
+JA_VOWEL = {'a': 'a', 'i': 'i', 'u': 'M', 'e': 'e', 'o': 'o'}
+# consonant label -> (plain, palatal)
+JA_CONS = {
+    '': (None, None), 'k': ('k', "k'"), 'g': ('g', "g'"), 's': ('s', 's'), 'sh': ('S', 'S'),
+    'z': ('z', 'z'), 'j': ('Z', 'Z'), 't': ('t', "t'"), 'ch': ('tS', 'tS'), 'ts': ('ts', 'ts'),
+    'd': ('d', "d'"), 'n': ('n', 'J'), 'h': ('h', 'C'), 'f': ('p\\', "p\\'"), 'b': ('b', "b'"),
+    'p': ('p', "p'"), 'm': ('m', "m'"), 'y': ('j', 'j'), 'r': ('4', "4'"), 'w': ('w', 'w'),
+    'v': ('b', "b'"),
+}
+# ヴ as its own phoneme: v, and v' before i (vi, vyu) like k / k'. Without it ヴ sings as b / b'.
+JA_V = ('v', "v'")
+V_PHONEMES = set(JA_V)
+V_DICT = {p: ('VoicedFricatives', True) for p in JA_V}
+V_MODES = ('auto', 'v', 'b')
+# y-glide labels -> base label
+JA_PAL = {'ky': 'k', 'gy': 'g', 'ty': 't', 'dy': 'd', 'ny': 'n', 'hy': 'h', 'fy': 'f', 'by': 'b',
+          'py': 'p', 'my': 'm', 'ry': 'r', 'vy': 'v'}
+# initial (after silence / N) variants of medial fricatives
+JA_INITIAL = {'z': 'dz', 'Z': 'dZ'}
+
+# relabel substitutes used to fill units a bank never recorded (closures sound alike)
+SUBST = {"k'": ['k'], "g'": ['g'], "t'": ['t'], "d'": ['d'], "p'": ['p'], "b'": ['b'], "m'": ['m'],
+         "4'": ['4'], 'J': ['n'], 'C': ['h'], "p\\'": ['p\\'], 'dz': ['z'], 'dZ': ['Z'], 'z': ['dz'],
+         'Z': ['dZ'], 'N': ['N\\', 'n'], "N'": ['N\\', 'n'], 'm': ['N\\'], 'n': ['N\\'],
+         "v'": ['v']}
+# in [C V] units only these are close enough to swap
+SUBST_CV = {"p\\'": ['p\\'], 'dz': ['z'], 'dZ': ['Z'], 'z': ['dz'], 'Z': ['dZ']}
+
+# phonemes the devkit's Japanese dictionary lacks: added to the generated dictionary.txt
+JA_EXTRA = {'b': ('VoicedPlosives', True), "b'": ('VoicedPlosives', True),
+            "p\\'": ('UnvoicedFricatives', False)}
+
+# words in UTAU folder names that name the recording method, not a voice colour
+METHOD_WORDS = re.compile(r'連続音|単独音|音源|CVVC|VCV|CV', re.I)
+NUMBERING = re.compile(r'(^|/)\s*\d+\s*[.)_\-]\s*')     # "4. F3", "11. CONSONANT RELEASES"
+MAIN_COLOR = re.compile(r'normal|standard|std|main|default|通常|ノーマル|標準', re.I)
+
+# fallbacks when the DB dictionary lacks a phoneme
+JA_FALLBACK = {"p\\'": 'p\\', 'h\\': 'h', "b'": 'b', 'v': 'b', "v'": "b'"}
+
+
+EN_FALLBACK = {'ph': 'p', 'th': 't', 'kh': 'k', 'bh': 'b', 'dh': 'd', 'gh': 'g', 'l0': 'l'}
+
+
+def fallback(p, have):
+    """p, or the closest phoneme `have` holds (v' -> b' -> b, kh -> k); p itself when nothing fits."""
+    q = p
+    while q not in have and (q in JA_FALLBACK or q in EN_FALLBACK):
+        q = JA_FALLBACK.get(q) or EN_FALLBACK[q]
+    return q if q in have else p
+
+_KANA = """
+あ a い i う u え e お o か ka き ki く ku け ke こ ko が ga ぎ gi ぐ gu げ ge ご go
+さ sa し shi す su せ se そ so ざ za じ ji ず zu ぜ ze ぞ zo た ta ち chi つ tsu て te と to
+だ da ぢ ji づ zu で de ど do な na に ni ぬ nu ね ne の no は ha ひ hi ふ fu へ he ほ ho
+ば ba び bi ぶ bu べ be ぼ bo ぱ pa ぴ pi ぷ pu ぺ pe ぽ po ま ma み mi む mu め me も mo
+や ya ゆ yu よ yo ら ra り ri る ru れ re ろ ro わ wa ゐ wi ゑ we を o ん n ゔ vu
+ぁ a ぃ i ぅ u ぇ e ぉ o
+きゃ kya きゅ kyu きぇ kye きょ kyo ぎゃ gya ぎゅ gyu ぎぇ gye ぎょ gyo
+しゃ sha しゅ shu しぇ she しょ sho じゃ ja じゅ ju じぇ je じょ jo すぃ si ずぃ zi
+ちゃ cha ちゅ chu ちぇ che ちょ cho てぃ ti てゅ tyu とぅ tu でぃ di でゅ dyu どぅ du
+つぁ tsa つぃ tsi つぇ tse つぉ tso にゃ nya にゅ nyu にぇ nye にょ nyo
+ひゃ hya ひゅ hyu ひぇ hye ひょ hyo ふぁ fa ふぃ fi ふぇ fe ふぉ fo ふゅ fyu
+びゃ bya びゅ byu びぇ bye びょ byo ぴゃ pya ぴゅ pyu ぴぇ pye ぴょ pyo
+みゃ mya みゅ myu みぇ mye みょ myo りゃ rya りゅ ryu りぇ rye りょ ryo
+いぇ ye うぃ wi うぇ we うぉ wo ゔぁ va ゔぃ vi ゔぇ ve ゔぉ vo ゔゅ vyu
+"""
+KANA = dict(zip(_KANA.split()[0::2], _KANA.split()[1::2]))
+JA_CONS_LABELS = sorted(set(JA_CONS) | set(JA_PAL), key=len, reverse=True)
+
+
+def kata_to_hira(s):
+    return ''.join(chr(ord(c) - 0x60) if 'ァ' <= c <= 'ヴ' else c for c in s)
+
+
+def kana_to_romaji(s):
+    s = kata_to_hira(s)
+    out, i = [], 0
+    while i < len(s):
+        if s[i:i + 2] in KANA:
+            out.append(KANA[s[i:i + 2]])
+            i += 2
+        elif s[i] in KANA:
+            out.append(KANA[s[i]])
+            i += 1
+        elif s[i] in 'っッ':
+            out.append('Q')  # sokuon: glottal stop, resolved by ja_syllable
+            i += 1
+        else:
+            return None
+    return out
+
+
+def _ja_cons(label, v):
+    return JA_V if v and label == 'v' else JA_CONS[label]
+
+
+def ja_syllable(rom, v=False):
+    """romaji syllable -> list of phonemes (without context rules), or None. v: ヴ is v / v', not b / b'."""
+    rom = rom.lower()
+    if rom in ('n', 'nn', "n'"):
+        return ['N\\']
+    if rom == 'q':  # bare sokuon っ: glottal stop (devkit Silence group has '?')
+        return ['?']
+    if rom.endswith('q') and len(rom) > 1:  # C + sokuon: てっ -> te + glottal stop
+        base = ja_syllable(rom[:-1], v)
+        return None if base is None else base + ['?']
+    if len(rom) == 2 and rom[0] in JA_VOWEL and rom[1] in JA_VOWEL:
+        v1, v2 = JA_VOWEL[rom[0]], JA_VOWEL[rom[1]]
+        return [v1] if v1 == v2 else [v1, v2]  # おぁ -> [o, a], あぁ stays [a]
+    if len(rom) == 3 and rom[1] in JA_VOWEL and rom[2] in JA_VOWEL:
+        c = ja_consonant(rom[0], v)  # CVV offglide: てぅ -> [t, e, u], どぉ -> [d, o]
+        if c is None:
+            return None
+        v1, v2 = JA_VOWEL[rom[1]], JA_VOWEL[rom[2]]
+        return [c, v1] if v1 == v2 else [c, v1, v2]
+    if rom == 'shi':
+        return ['S', 'i']
+    if rom == 'chi':
+        return ['tS', 'i']
+    if rom == 'tsu':
+        return ['ts', 'M']
+    if rom == 'fu':
+        return ['p\\', 'M']
+    if rom == 'ji':
+        return ['Z', 'i']
+    if not rom or rom[-1] not in JA_VOWEL:
+        return None
+    label, vw = rom[:-1], rom[-1]
+    vowel = JA_VOWEL[vw]
+    if label in JA_PAL:
+        cons = _ja_cons(JA_PAL[label], v)[1]
+    elif label in JA_CONS:
+        plain, pal = _ja_cons(label, v)
+        cons = pal if vw == 'i' and label not in ('s', 'z', 'ts', 'w', 'y') else plain
+    else:
+        return None
+    return [vowel] if cons is None else [cons, vowel]
+
+
+def ja_consonant(label, v=False):
+    """CVVC VC right side ('k', 'ky', 'sh', 'n' ...) -> consonant phoneme or None."""
+    label = label.lower()
+    if label in JA_PAL:
+        return _ja_cons(JA_PAL[label], v)[1]
+    if label in JA_CONS and label:
+        return _ja_cons(label, v)[0]
+    if label == 'ng':
+        return 'N'
+    return None
+
+
+def ja_token(tok, v=False):
+    """One alias token -> (kind, phonemes). kind: 'sil', 'syl', 'cons', 'skip'."""
+    if tok in ('-', 'R', '_', 'sil', 'Sil'):
+        return 'sil', ['Sil']
+    if tok in ('息', '吸', 'br', 'breath', '・', '?'):
+        return 'skip', []
+    if re.search(r'[぀-ヿ]', tok):
+        tok = tok.rstrip("'’")  # edge-bank tag leaking into the alias: く' is just く
+        if '・' in tok:
+            return 'skip', []
+        rom = kana_to_romaji(tok)
+        if not rom:
+            return 'skip', []
+        tok = ''.join(rom)  # multi-char for small-kana combos: てぅ -> 'teu', てっ -> 'teQ'
+        if tok == 'n':
+            return 'syl', ['N\\']
+    elif tok.lower() in ('n', 'nn'):
+        return 'cons', ['n']          # romaji n: VC consonant on the right, ん elsewhere
+    syl = ja_syllable(tok, v)
+    if syl is not None:
+        return 'syl', syl
+    c = ja_consonant(tok, v)
+    if c is not None:
+        return 'cons', [c]
+    return 'skip', []
+
+
+def nasal_before(nxt):
+    """Context variant of ん given the following phoneme."""
+    if nxt in ('k', "k'", 'g', "g'", 'N'):
+        return 'N'
+    if nxt in ('p', "p'", 'b', "b'", 'm', "m'", 'v', "v'"):
+        return 'm'
+    if nxt in ('t', "t'", 'd', "d'", 'ts', 'tS', 'dz', 'dZ', 'n', 'J', '4', "4'", 'z', 'Z'):
+        return 'n'
+    if nxt in ('j', 'i'):
+        return "N'"
+    return 'N\\'
+
+
+def ja_alias(alias, v=False):
+    """Japanese alias -> phoneme list, or None to skip. v: ヴ is v / v', not b / b'."""
+    alias = re.sub(r'^\*+\s*', '', alias)  # '* あ': spare trigger of the same recording
+    alias = re.sub(r'^[xXｘＸ](?=[぀-ヿ巻])', '', alias)  # 'xか': extra take of the same syllable
+    toks = alias.split()
+    if not toks or len(toks) > 2:
+        return None
+    parsed = [ja_token(t, v) for t in toks]
+    if any(k == 'skip' for k, _ in parsed):
+        return None
+    if len(parsed) == 1:
+        kind, ph = parsed[0]
+        if kind == 'sil':
+            return None
+        if kind == 'cons':             # lone consonant alias (e.g. CVVC "k"); only "n" means ん
+            return ['N\\'] if ph == ['n'] else None
+        return ph                      # CV / V / N
+    (k0, p0), (k1, p1) = parsed
+    if k0 == 'sil' and k1 == 'sil':
+        return None
+    if k0 == 'cons':                   # "n ka" (ん + CV) or a consonant-led split
+        left = ['N\\'] if p0 == ['n'] else p0
+    elif k0 == 'syl':
+        left = [p0[-1]]                # VCV left side: the vowel (or N) it ends with
+    else:
+        left = ['Sil']
+    right = p1
+    seq = left + right
+    # context rules
+    if seq[0] == 'N\\' and len(seq) > 1:
+        seq[0] = nasal_before(seq[1])
+    for i in range(1, len(seq)):
+        prev = seq[i - 1]
+        if seq[i] in JA_INITIAL and (prev == 'Sil' or prev in NASAL):
+            seq[i] = JA_INITIAL[seq[i]]
+    return seq
+
+
+# ------------------------------------------------------------------ English (Arpasing)
+
+ARPA = {
+    'aa': 'Q', 'ae': '{', 'ah': 'V', 'ao': 'O:', 'aw': 'aU', 'ax': '@', 'ay': 'aI', 'eh': 'e', 'er': '@r',
+    'ey': 'eI', 'ih': 'I', 'iy': 'i:', 'ow': '@U', 'oy': 'OI', 'uh': 'U', 'uw': 'u:',
+    'b': 'b', 'ch': 'tS', 'd': 'd', 'dh': 'D', 'dx': '4', 'f': 'f', 'g': 'g', 'hh': 'h', 'jh': 'dZ',
+    'k': 'k', 'l': 'l', 'm': 'm', 'n': 'n', 'ng': 'N', 'p': 'p', 'r': 'r', 's': 's', 'sh': 'S',
+    't': 't', 'th': 'T', 'v': 'v', 'w': 'w', 'y': 'j', 'z': 'z', 'zh': 'Z', 'q': '?',
+}
+
+
+def en_arpa_alias(alias):
+    toks = alias.split()
+    if not 2 <= len(toks) <= 3:
+        return None
+    seq = []
+    for t in toks:
+        if t in ('-', 'R', '_'):         # lowercase r is the consonant ("aa r", "r aa"), not a rest
+            seq.append('Sil')
+        elif t.lower() in ARPA:
+            seq.append(ARPA[t.lower()])
+        else:
+            return None
+    if seq.count('Sil') == len(seq) or 'Sil' in seq[1:-1]:
+        return None
+    return seq
+
+
+# X-SAMPA-style English banks (e.g. Kasane Teto English): syllables written together ("dZu", "DaI", "skl"),
+# "-" for silence, a trailing "-" for a word end ("oU l-").
+XSAMPA_EN = {
+    'tS': 'tS', 'dZ': 'dZ', 'aI': 'aI', 'aU': 'aU', 'OI': 'OI', 'eI': 'eI', 'oU': '@U',
+    '@': '@', '3': '@r', 'A': 'Q', 'a': 'Q', 'E': 'e', 'e': 'e', 'I': 'I', 'i': 'i:', 'O': 'O:', 'o': '@U',
+    'U': 'U', 'u': 'u:', 'V': 'V', '{': '{',
+    'b': 'b', 'd': 'd', 'g': 'g', 'p': 'p', 't': 't', 'k': 'k', 'f': 'f', 'v': 'v', 'T': 'T', 'D': 'D',
+    's': 's', 'z': 'z', 'S': 'S', 'Z': 'Z', 'h': 'h', 'm': 'm', 'n': 'n', 'N': 'N', 'l': 'l', 'r': 'r',
+    'w': 'w', 'j': 'j',
+}
+_XS_KEYS = sorted(XSAMPA_EN, key=len, reverse=True)
+
+
+def _xsampa_token(tok):
+    out, i = [], 0
+    while i < len(tok):
+        for k in _XS_KEYS:
+            if tok.startswith(k, i):
+                out.append(XSAMPA_EN[k])
+                i += len(k)
+                break
+        else:
+            return None
+    return out
+
+
+def en_xsampa_alias(alias):
+    seq = []
+    for tok in alias.split():
+        if tok in ('-', 'R', '_'):
+            seq.append('Sil')
+            continue
+        end = tok.endswith('-') and len(tok) > 1
+        ph = _xsampa_token(tok[:-1] if end else tok)
+        if not ph:
+            return None
+        seq += ph + (['Sil'] if end else [])
+    if len(seq) == 1:
+        return seq if seq[0] in VOWELS else None      # a lone held vowel: stationary material
+    if seq.count('Sil') == len(seq) or 'Sil' in seq[1:-1]:
+        return None
+    return seq
+
+
+# VOCALOID English writes a plosive that starts a syllable aspirated (kiss = kh I s, big = bh I g, but
+# sky = s k aI, rock = r Q k) and l clear before a vowel (list = l0 I s t, feel = f i: l). Banks record one
+# sound for both: the alias says which one it is, and the other spelling is filled from the same recording.
+EN_ASPIRATED = {'p': 'ph', 't': 'th', 'k': 'kh', 'b': 'bh', 'd': 'dh', 'g': 'gh'}
+EN_ALLOPHONE = dict(EN_ASPIRATED, **{v: k for k, v in EN_ASPIRATED.items()}, l='l0', l0='l')
+EN_ONSET_GLIDES = {'l', 'r', 'w', 'j'}           # kh l0 i: n (clean), ph r eI (pray), kh w i: n (queen)
+# VOCALOID English's r-coloured vowels (are = Q@, for = f O@, here = h I@) and the vowel each starts as.
+# Arpasing banks never record them: they're built from the vowel, its [V r] and the bank's @r.
+EN_RHOTIC = {'Q@': 'Q', 'O@': 'O:', 'I@': 'I', 'e@': 'e', 'U@': 'U'}
+
+
+def en_context(seq):
+    """Aspirated plosives and clear l where VOCALOID English puts them: a plosive before a vowel or an
+    onset glide (or right after silence), not after s; l before a vowel or right after silence."""
+    out = list(seq)
+    for i, p in enumerate(seq):
+        prev = seq[i - 1] if i else None
+        nxt = seq[i + 1] if i + 1 < len(seq) else None
+        onset = nxt in VOWELS or (nxt is None and prev == 'Sil')
+        if p in EN_ASPIRATED and prev != 's' and (onset or nxt in EN_ONSET_GLIDES):
+            out[i] = EN_ASPIRATED[p]
+        elif p == 'l' and onset:
+            out[i] = 'l0'
+    return out
+
+
+def en_alias(alias):
+    seq = en_arpa_alias(alias) or en_xsampa_alias(alias)
+    return en_context(seq) if seq else seq
+
+
+# ------------------------------------------------------------------ language detection
+
+def detect_language(aliases):
+    ja = en = xs = 0
+    for a in aliases:
+        if re.search(r'[぀-ヿ]', a):
+            ja += 1
+            continue
+        toks = a.lower().split()
+        if toks and all(t in ARPA or t == '-' for t in toks) and any(t in ARPA and len(t) == 2 for t in toks):
+            en += 1
+        elif ja_alias(a) is not None:
+            ja += 1
+        elif en_xsampa_alias(a) is not None:
+            xs += 1
+    return 'en' if en + xs > ja else 'ja'
+
+
+def alias_to_phonemes(alias, lang, v=False):
+    return en_alias(alias) if lang == 'en' else ja_alias(alias, v)
+
+
+def v_aliases(aliases):
+    """The aliases of a Japanese bank that sing ヴ (ゔぁ, "a ヴぃ", CVVC "a v" ...)."""
+    return [a for a in aliases if any(p in V_PHONEMES for p in ja_alias(a, True) or ())]
+
+
+_EXTRA_V = {'a': 'a', 'i': 'i', 'u': 'M', 'e': 'e', 'o': 'o', 'n': 'N\\',
+            'あ': 'a', 'い': 'i', 'う': 'M', 'え': 'e', 'お': 'o', 'ん': 'N\\'}
+
+
+def lead_vowel(alias):
+    """The vowel a Japanese alias like "a R", "a laugh", "お cough" starts with (its left side), or None."""
+    m = re.match(r'\s*([aiueonあいうえおん])\s+\S', alias)
+    return _EXTRA_V[m.group(1)] if m else None
+
+
+def extra_alias(alias):
+    """The built-in extra: a vowel ending "a R" -> [a Sil], or None."""
+    a = alias.strip().replace('ｘ', 'x').replace('Ｘ', 'x')
+    a = re.sub(r'^\*+\s*', '', a)
+    a = re.sub(r'^[xX](?=[぀-ヿ])', '', a)
+    m = re.fullmatch(r'([aiueonあいうえおん])\s*R\s*[↑↓]?\d*', a)
+    return [_EXTRA_V[m.group(1)], 'Sil'] if m else None

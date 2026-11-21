@@ -1,0 +1,864 @@
+"""Drive VocaloidDBTool3.exe to build a singer DB from a converted folder (Windows, needs pywinauto).
+
+Runs a private copy of the DBTool with its own VocaloidDBTool.ini, so the devkit's ini is never
+touched: New singer database (from dictionary.txt) -> Automatic Segmentation -> add stationaries ->
+optimize EpR guides -> add articulations -> exit.
+
+By default the DBTool runs on a hidden desktop of its own: its windows exist (so it can be driven as
+usual) but never show, and the PC stays free to use. If that gets stuck, the build runs again where
+the DBTool can be seen.
+"""
+import os
+import re
+import shutil
+import tempfile
+import threading
+import time
+import warnings
+
+warnings.filterwarnings('ignore')   # pywinauto: 32-bit target from 64-bit Python is fine for this
+
+# DBTool menu command ids and Automatic Database Creation dialog controls
+CMD_NEW_DB, CMD_AUTO_SEG, CMD_EXIT = 470, 1136, 484
+LIST, ADD_STAT, OPT_EPR, ADD_ART = 1201, 1206, 1212, 1216
+COL_STAT_TO_ADD, COL_STAT_ADDED, COL_ART_TO_ADD, COL_ART_ADDED = 6, 7, 9, 13
+AUTO_DLG = 'Automatic Database Creation Dialog'
+# The two folder windows Automatic Segmentation opens, by the prompt the DBTool puts in them. Their title
+# comes from Windows and is translated ("Browse for Files or Folders", "Telusuri File atau Folder", ...).
+FOLDER_PROMPTS = ('select wavefile folder', 'select segmentation toolkit folder')
+BFFM_SETSELECTIONA = 0x400 + 102
+
+
+def folder_prompt(texts):
+    """0 (wave files) or 1 (toolkit) for a window showing these texts, None for any other window."""
+    for t in texts:
+        t = (t or '').strip().lower()
+        if t in FOLDER_PROMPTS:
+            return FOLDER_PROMPTS.index(t)
+    return None
+
+
+class DBToolError(RuntimeError):
+    pass
+
+
+SIDE_BY_SIDE = ('the DBTool (%s) cannot start: Windows says its "side-by-side configuration is incorrect", '
+                'which means the Microsoft Visual C++ 2008 runtime it was built with is not installed. Install '
+                'the "Microsoft Visual C++ 2008 Redistributable" x86 version (also on 64-bit Windows; the '
+                'DBTool is a 32-bit program), restart the PC and build again.')
+
+
+def _start_error(ex, exe):
+    """A DBToolError for the DBTool failing to start. Error 14001 (side-by-side) is a missing VC++ 2008
+    runtime, which Windows reports in words nobody can act on."""
+    if '14001' in str(ex) or 'side-by-side' in str(ex).lower():
+        return DBToolError(SIDE_BY_SIDE % exe)
+    return DBToolError('the DBTool (%s) cannot start: %s' % (exe, ex))
+
+
+def ascii_path(path):
+    """True when path is plain ASCII. The DBTool is an ANSI program and drops out on *any* non-ASCII
+    character in a path it is handed — even one this PC's code page could hold: with a user name like
+    C:\\Users\\廖泽鑫\\AppData\\Local\\Temp the temp folder is "encodable" in cp936 and the DBTool still
+    exits the moment it reads the dictionary path. So only plain ASCII may reach it."""
+    return all(ord(c) < 128 for c in path)
+
+
+def ansi_safe(path):
+    """The DBTool is an ANSI program: a path with characters outside plain ASCII (a Japanese bank name,
+    an accent, or a non-English Windows user name in the temp folder) never reaches it, and it then
+    quietly does nothing or exits. Same rule as ascii_path, kept as the name the rest of the code uses."""
+    return ascii_path(path)
+
+
+def _short_path(path):
+    try:
+        import win32api
+        return win32api.GetShortPathName(path)
+    except Exception:                             # noqa: BLE001 - no 8.3 names on this drive
+        return path
+
+
+_SAFE_ROOT = []
+
+
+def safe_temp():
+    """A folder for the DBTool's working files whose path the DBTool can read: plain ASCII only.
+
+    tempfile.gettempdir() is C:\\Users\\<name>\\AppData\\Local\\Temp, so every non-English Windows user
+    name puts non-ASCII characters into the folder the dictionary and the recordings are staged in —
+    and the DBTool, handed that path, exits on the spot. When the temp folder is not ASCII we use
+    another folder that is (the 8.3 short form of the same folder, Public, ProgramData, C:\\HenkanTemp),
+    so the staged dictionary stays somewhere the DBTool can open."""
+    if _SAFE_ROOT:
+        return _SAFE_ROOT[0]
+    tmp = tempfile.gettempdir()
+    drive = os.environ.get('SystemDrive', 'C:') + os.sep
+    public = os.environ.get('PUBLIC') or os.path.join(drive, 'Users', 'Public')
+    for d in (tmp, _short_path(tmp), os.path.join(public, 'Henkan'),
+              os.path.join(os.environ.get('ProgramData', drive + 'ProgramData'), 'Henkan'),
+              os.path.join(drive, 'HenkanTemp')):
+        if not ascii_path(d):
+            continue
+        try:
+            os.makedirs(d, exist_ok=True)
+            os.rmdir(tempfile.mkdtemp(dir=d))     # can we write there?
+        except OSError:
+            continue
+        _SAFE_ROOT.append(d)
+        return d
+    raise DBToolError('found no folder the DBTool can read: the temp folder (%s) has characters in its path '
+                      'that the DBTool cannot open (non-English Windows user name). Make a folder C:\\HenkanTemp '
+                      'and press Make my voicebank again, or set TMP and TEMP to a path with plain letters.' % tmp)
+
+
+def _mkdtemp(prefix):
+    return tempfile.mkdtemp(prefix=prefix, dir=safe_temp())
+
+
+def _decode(name):
+    return re.sub(r'%(\d+)%', lambda m: chr(int(m.group(1))), name)
+
+
+def expected_units(seg_folder):
+    """(articulation pairs, stationary phonemes) the converted folder will add, from its .as files."""
+    from . import dbtool_io
+    art, stat = set(), set()
+    for fn in os.listdir(seg_folder):
+        if re.search(r'\.as\d+$', fn):
+            try:
+                a = dbtool_io.read_as(os.path.join(seg_folder, fn))
+            except Exception:                     # noqa: BLE001 - validate reports broken files
+                continue
+            if len(a.phns) == 1:
+                stat.add(a.phns[0])
+            else:
+                art.add(tuple(a.phns))
+    return art, stat
+
+
+def _finished(cell):
+    """An "added" cell is done once it says YES (or an error): while the DBTool is still working on a row
+    it shows "...1", and closing then cut the last articulation off on slower PCs."""
+    t = cell.strip()
+    return bool(t) and not t.startswith('...')
+
+
+class DBToolHandoff(DBToolError):
+    """The automation got stuck; the DBTool is left open with its files so the user can finish by hand."""
+
+
+class DBToolFrozen(DBToolError):
+    """The DBTool is running but no longer answers Windows. Worth one more try from the start."""
+
+
+FROZEN = ('the DBTool stopped responding right after opening %s. Your dictionary is not the problem (the DBTool '
+          'accepts any file at this step): the DBTool itself froze on this PC')
+
+
+class NoFiles(DBToolError):
+    """The segmentation list came up empty: the DBTool read the wrong folder. Nothing to finish by hand."""
+
+
+class NoHiddenDesktop(DBToolError):
+    """Windows would not give us a hidden desktop: the DBTool runs where it can be seen."""
+
+
+class HiddenDesktop:
+    """A desktop of our own that is never shown. The calling thread moves onto it (it must not own any
+    window yet), so the DBTool's windows started there can be found and driven like visible ones."""
+
+    def __init__(self):
+        import win32api
+        import win32con
+        import win32service
+        self.name = 'Henkan_%d_%d' % (os.getpid(), threading.get_ident())
+        try:
+            self.orig = win32service.GetThreadDesktop(win32api.GetCurrentThreadId())
+            self.desk = win32service.CreateDesktop(self.name, 0, win32con.GENERIC_ALL, None)
+            self.desk.SetThreadDesktop()
+        except Exception as ex:                   # noqa: BLE001 - pywintypes.error and friends
+            raise NoHiddenDesktop(str(ex))
+
+    @property
+    def path(self):
+        return 'WinSta0\\' + self.name
+
+    def close(self):
+        try:
+            self.orig.SetThreadDesktop()
+            self.desk.CloseDesktop()
+        except Exception:                         # noqa: BLE001 - freed when the process ends anyway
+            pass
+
+
+def _on_hidden_desktop(fn):
+    """fn(desktop) on a fresh thread moved onto a hidden desktop; returns or raises what fn did."""
+    out = {}
+
+    def run():
+        try:
+            desk = HiddenDesktop()
+        except NoHiddenDesktop as ex:
+            out['err'] = ex
+            return
+        try:
+            out['ok'] = fn(desk)
+        except BaseException as ex:               # noqa: BLE001 - handed to the caller
+            out['err'] = ex
+        finally:
+            desk.close()
+    th = threading.Thread(target=run, name='DBTool (hidden)', daemon=True)
+    th.start()
+    while th.is_alive():
+        th.join(0.5)
+    if 'err' in out:
+        raise out['err']
+    return out['ok']
+
+
+HANDOFF = '''The DBTool got stuck at "%s", so it was left open for you to finish by hand:
+  in the "Automatic Segmentation" window select every row (click the first, shift+click the last), then press
+  1. Add Stationaries To Database   (wait until the "added" column says Yes everywhere)
+  2. Optimize EpR Guides
+  3. Add Articulations To Database   (this one takes a few minutes)
+  then press Exit and close the DBTool. Your DB is: %s
+(Its working files are in %s; delete that folder afterwards.)'''
+
+
+class DBTool:
+    def __init__(self, exe, seg_folder, log=print, desktop=None):
+        """desktop: a HiddenDesktop to run on (the calling thread must be on it too), or None."""
+        from pywinauto import Application
+        import win32con
+        import win32gui
+        self._gui, self._con = win32gui, win32con
+        self.log = log
+        self.hidden = desktop is not None
+        self.seg_folder = os.path.abspath(seg_folder)
+        self.work = _mkdtemp('dbtool_')
+        shutil.copy(exe, self.work)
+        with open(os.path.join(self.work, 'VocaloidDBTool.ini'), 'w', newline='\r\n') as f:
+            f.write('[Segmentate Folder]\nWavefilePath=%s\nToolkitPath=%s\n[External Tool]\n'
+                    'ExtWaveEditorPath=\nUseExtWaveEditor=0\nMasterVolume=0\n'
+                    % (os.path.abspath(seg_folder), self.work))
+        path = os.path.join(self.work, os.path.basename(exe))
+        try:
+            if desktop is None:
+                self.app = Application(backend='win32').start(path, work_dir=self.work)
+            else:
+                import win32process
+                si = win32process.STARTUPINFO()
+                si.lpDesktop = desktop.path
+                _hp, _ht, pid, _tid = win32process.CreateProcess(None, '"%s"' % path, None, None, False, 0,
+                                                                 None, self.work, si)
+                self.app = Application(backend='win32').connect(process=pid)
+        except Exception as ex:
+            raise _start_error(ex, exe) from ex
+        self.main = self._wait(lambda: [w for w in self.app.windows() if w.class_name().startswith('Afx')
+                                        and w.menu() and w.menu().item_count()], 30, 'main window')[0]
+
+    # ------------------------------------------------------------ plumbing
+    def _alive(self):
+        return self.app.is_process_running()
+
+    def _responding(self):
+        """Does the DBTool still answer Windows? A frozen one is alive, but its windows all read as untitled."""
+        try:
+            self._gui.SendMessageTimeout(self.main.handle, self._con.WM_NULL, 0, 0, self._con.SMTO_ABORTIFHUNG, 3000)
+        except Exception:                         # noqa: BLE001 - pywintypes.error: hung, or the window is gone
+            return False
+        return True
+
+    def _wait(self, cond, timeout, what, poll=0.5):
+        t = time.time()
+        while time.time() - t < timeout:
+            if not self._alive():
+                raise DBToolError('the DBTool exited while waiting for %s' % what)
+            r = cond()
+            if r:
+                return r
+            time.sleep(poll)
+        raise DBToolError('timed out waiting for %s. On screen: %s' % (what, self._describe()))
+
+    def _describe(self):
+        out = []
+        for w in self.app.windows():
+            if w.is_visible():
+                t = [c.window_text() for c in w.children() if c.class_name() in ('Static', 'Button')
+                     and c.window_text()]
+                out.append('[%s] %s' % (w.window_text(), ' | '.join(t)[:300]))
+        return '; '.join(out)
+
+    def _dialog(self, title, timeout=30):
+        w = self._wait(lambda: [w for w in self.app.windows()
+                                if w.is_visible() and w.window_text() == title], timeout, title)[0]
+        return self.app.window(handle=w.handle)
+
+    def _menu(self, cmd):
+        self._gui.PostMessage(self.main.handle, self._con.WM_COMMAND, cmd, 0)
+
+    def _message_box(self):
+        """Text of a visible message box, if the DBTool popped one."""
+        for w in self.app.windows():
+            if w.is_visible() and w.class_name() == '#32770' and w.window_text() != AUTO_DLG:
+                texts = [c.window_text() for c in w.children() if c.class_name() == 'Static']
+                if any(texts):
+                    return w, ' '.join(t for t in texts if t)
+        return None
+
+    def _ok(self, dlg, what):
+        """Press OK (IDOK) until the dialog is gone."""
+        h = dlg.handle
+        for _ in range(5):
+            self._gui.PostMessage(h, self._con.WM_COMMAND, 1, 0)
+            try:
+                self._wait(lambda: not self._gui.IsWindow(h), 5, what + ' to close')
+                return
+            except DBToolError:
+                if not self._alive():
+                    raise
+        raise DBToolError('%s does not close. On screen: %s' % (what, self._describe()))
+
+    def _file_dialog(self, title, path):
+        dlg = self._dialog(title)
+        time.sleep(1)
+        edit = [c for c in dlg.descendants() if c.class_name() == 'Edit' and c.is_visible()][0]
+        edit.set_edit_text(path)
+        time.sleep(0.3)
+        self._ok(dlg, 'dialog "%s"' % title)
+
+    # ------------------------------------------------------------ steps
+    def new_db(self, dictionary, db_path, language='Japanese'):
+        """db_path: folder\\Name -> creates folder\\Name.dat, Name.tree and Name\\singer.inf."""
+        self._menu(CMD_NEW_DB)
+        self._file_dialog('Load Phonetic Dictionary file', os.path.abspath(dictionary))
+        try:
+            self._dialog('Singer database Path & Name', timeout=180)
+        except DBToolError as ex:
+            if self._alive() and not self._responding():
+                raise DBToolFrozen(FROZEN % dictionary) from ex
+            raise DBToolError('the DBTool did not open its next window after %s (%s)' % (dictionary, ex)) from ex
+        self._file_dialog('Singer database Path & Name', os.path.abspath(db_path))
+        dlg = self._dialog('Select language')
+        box = dlg.child_window(class_name='ComboBox').wrapper_object()
+        for _ in range(40):                     # the list fills a moment after the dialog shows
+            items = box.item_texts()
+            match = [s for s in items if s.strip().lower().startswith(language.lower())]
+            if match:
+                break
+            time.sleep(0.25)
+        else:
+            raise DBToolError('language %r not offered by the DBTool (it lists %s)' % (language, items))
+        box.select(match[0])
+        self._ok(dlg, 'Select language')
+        self._wait(lambda: os.path.exists(os.path.abspath(db_path) + '.tree'), 120, 'the new DB files')
+        self.db_path = os.path.abspath(db_path)
+
+    def load_db(self, db_path):
+        """File > Load singer database (singer.inf), quick load."""
+        self._menu(471)
+        self.db_path = os.path.abspath(db_path)
+        self._file_dialog('Open singer database', os.path.join(os.path.abspath(db_path), 'singer.inf'))
+        dlg = self._dialog('Rebuild Database Tree Structure', timeout=60)
+        time.sleep(1)
+        self._ok(dlg, 'Rebuild Database Tree Structure')
+        time.sleep(3)
+
+    def quit(self):
+        """Exit the DBTool (with no dialog open)."""
+        self._menu(CMD_EXIT)
+        try:
+            self._wait(lambda: not self._alive() or None, 30, 'the DBTool to exit')
+        except DBToolError:
+            self.app.kill()
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def _folder_window(self, vis):
+        """(window, 0 wave files / 1 toolkit) for a visible folder window of the DBTool, else None."""
+        for w in vis:
+            if w.class_name() != '#32770' or w.window_text() == AUTO_DLG:
+                continue
+            try:
+                k = folder_prompt([c.window_text() for c in w.children()])
+            except Exception:                     # noqa: BLE001 - the window went away meanwhile
+                continue
+            if k is not None:
+                return w, k
+        return None
+
+    def _set_folder(self, h, path):
+        """Select path in the folder window (BFFM_SETSELECTIONA, the string placed in the DBTool's memory).
+        The DBTool preselects the folder from its ini, but OK on anything else gives an empty list."""
+        import ctypes
+        from pywinauto.remote_memory_block import RemoteMemoryBlock
+        try:
+            data = ctypes.create_string_buffer(path.encode('mbcs'))
+            mem = RemoteMemoryBlock(self.app.window(handle=h).wrapper_object(), size=ctypes.sizeof(data) + 16)
+            try:
+                mem.Write(data)
+                self._gui.SendMessageTimeout(h, BFFM_SETSELECTIONA, 1, mem.Address(),
+                                             self._con.SMTO_ABORTIFHUNG, 5000)
+            finally:
+                mem.CleanUp()
+        except Exception:                         # noqa: BLE001 - the ini's preselection is still there
+            pass
+
+    def _confirm_folder(self, dlg, path, what):
+        """OK a folder window ("Select wavefile folder"). On some PCs a posted OK is ignored (no folder
+        selected yet): select the folder, press OK every way we can, and in the end wait for the user to
+        press it (the build used to give up after 25 s and close the DBTool)."""
+        h = dlg.handle
+        self._set_folder(h, path)
+        try:
+            edits = [c for c in dlg.descendants() if c.class_name() == 'Edit' and c.is_visible()]
+            if edits:
+                edits[0].set_edit_text(path)
+        except Exception:                         # noqa: BLE001 - no edit box in this version
+            pass
+        tries = [lambda: self._gui.PostMessage(h, self._con.WM_COMMAND, 1, 0),
+                 lambda: dlg.child_window(control_id=1).click(),
+                 lambda: dlg.type_keys('{ENTER}', set_foreground=True)]
+        for k, press in enumerate(tries * 2):
+            try:
+                press()
+            except Exception:                     # noqa: BLE001
+                pass
+            for _ in range(10):
+                time.sleep(0.5)
+                if not self._gui.IsWindow(h) or not self._gui.IsWindowVisible(h):
+                    return
+        if self.hidden:                           # nobody can press it there: run again where it shows
+            raise DBToolError('the DBTool\'s folder window (%s) would not close' % what)
+        self.log('>>> please press OK (or Enter) in the DBTool\'s folder window "%s" (%s: %s)'
+                 % (FOLDER_PROMPTS[what == 'toolkit'].capitalize(), what, path))
+        self._wait(lambda: not self._gui.IsWindow(h) or not self._gui.IsWindowVisible(h), 600,
+                   'you to press OK in the folder window')
+
+    def open_auto_segmentation(self):
+        self._menu(CMD_AUTO_SEG)
+        # Usually it asks for the wave-file folder, then the toolkit folder (both from the ini); some
+        # DBTool installs skip those windows and open the list straight away. Handle whichever shows up.
+        # The folder windows are told apart by the DBTool's prompt in them, not their (translated) title.
+        t0 = time.time()
+        while True:
+            vis = [w for w in self.app.windows() if w.is_visible()]
+            if any(w.window_text() == AUTO_DLG for w in vis):
+                break
+            browse = self._folder_window(vis)
+            if browse:
+                time.sleep(1)
+                w, k = browse
+                self._confirm_folder(self.app.window(handle=w.handle), (self.seg_folder, self.work)[k],
+                                     ('wave files', 'toolkit')[k])
+                continue
+            if not self._alive():
+                raise DBToolError('the DBTool exited while opening Automatic Segmentation')
+            if time.time() - t0 > 900:
+                raise DBToolError('timed out waiting for the Automatic Segmentation window. On screen: %s'
+                                  % self._describe())
+            time.sleep(0.5)
+        self.dlg = self._dialog(AUTO_DLG, timeout=600)
+        self.dlg_handle = self.dlg.handle
+        self.lv = self.dlg.child_window(control_id=LIST).wrapper_object()
+        t0 = time.time()
+        self.rows = self.lv.item_count()
+        while not self.rows and time.time() - t0 < 20:
+            time.sleep(1)
+            self.rows = self.lv.item_count()
+        self.log('DBTool lists %d files' % self.rows)
+        if not self.rows:
+            raise NoFiles('the DBTool lists no files in its "Automatic Segmentation" window: it was given '
+                          'another folder than %s' % self.seg_folder)
+
+    def _col(self, col, tries=10):
+        """One list column. Reading another process's list view can fail while the DBTool redraws it."""
+        for k in range(tries):
+            try:
+                return [self.lv.get_item(i, col).text() for i in range(self.rows)]
+            except Exception:                     # noqa: BLE001 - pywinauto raises several kinds
+                if not self._alive() or k == tries - 1:
+                    raise
+                time.sleep(2)
+
+    def _select_all_keys(self):
+        """Select every row with the keyboard (Home, Shift+End): needs no access to the list's memory."""
+        try:
+            self.lv.set_focus()
+            self.lv.type_keys('{HOME}+{END}', set_foreground=True)
+            time.sleep(1)
+        except Exception as ex:                   # noqa: BLE001
+            raise DBToolError('could not select the rows (%s)' % ex)
+        return list(range(self.rows))
+
+    def _select(self, col):
+        try:
+            rows = [i for i, t in enumerate(self._col(col)) if t]
+        except Exception as ex:                   # noqa: BLE001 - some PCs can't read another program's list
+            self.log('  could not read the list (%s): selecting every row' % ex)
+            return self._select_all_keys()
+        for attempt in range(3):
+            for i in range(self.rows):
+                self.lv.deselect(i)
+            for i in rows:
+                self.lv.select(i)
+            time.sleep(0.5)
+            try:
+                n = self.lv.get_selected_count()
+            except Exception:                     # noqa: BLE001 - can't tell: trust it
+                return rows
+            if n == len(rows):
+                return rows
+            self.log('  selected %d of %d rows, selecting again' % (n, len(rows)))
+            time.sleep(2)
+        self.log('  selecting rows one by one did not work: selecting every row')
+        return self._select_all_keys()
+
+    def _press(self, button):
+        """Press a dialog button with its WM_COMMAND: works whether or not the window has focus (a
+        simulated click sometimes never reached the DBTool and the build waited forever)."""
+        h = self._gui.GetDlgItem(self.dlg_handle, button)
+        self._gui.PostMessage(self.dlg_handle, self._con.WM_COMMAND, button & 0xFFFF, h)
+
+    def _run(self, button, done, timeout, what, progress=None, stall=180):
+        """Press button and wait for done(). progress() (a count) tells whether anything is happening:
+        nothing for `stall` seconds after a press -> press again, twice, then hand over to the user."""
+        self._press(button)
+        t = t_press = time.time()
+        presses, last = 1, (progress() if progress else None)
+        while True:
+            time.sleep(3)
+            if not self._alive():
+                raise DBToolError('the DBTool exited (crashed?) during: %s' % what)
+            mb = self._message_box()
+            if mb and 'currently running tasks' in mb[1]:
+                # the previous step is still finishing (saving): dismiss, wait, press the button again
+                self._gui.PostMessage(mb[0].handle, self._con.WM_COMMAND, 1, 0)       # OK
+                time.sleep(5)
+                self._press(button)
+                t_press = time.time()
+                continue
+            if mb and 'want to continue' in mb[1]:
+                # "...already been segmented. Previous segmentation ... will be lost. Do you want to
+                # continue?" - our .as files are the segmentation we want, so: Yes
+                self.log('  DBTool asks: %s -> Yes' % mb[1][:90])
+                self._gui.PostMessage(mb[0].handle, self._con.WM_COMMAND, 6, 0)       # IDYES
+                time.sleep(2)
+            elif mb:
+                raise DBToolError('%s: the DBTool says: %s' % (what, mb[1]))
+            n = done()
+            if n is True:
+                return
+            if progress:
+                now = progress()
+                if now != last:
+                    last, t_press = now, time.time()
+                elif time.time() - t_press > stall:
+                    if presses >= 3:
+                        raise DBToolError('nothing happened after pressing "%s" %d times' % (what, presses))
+                    self.log('  no progress on "%s" for %d s, pressing it again' % (what, stall))
+                    self._press(button)
+                    presses += 1
+                    t_press = time.time()
+            if time.time() - t > timeout:
+                raise DBToolError('timed out during: %s' % what)
+
+    def _db_units(self, kind):
+        """Units already written to the DB folder: {phonemes or phoneme: (bytes, mtime)}. The DBTool writes
+        one file per unit (voice/articulation/<p1>/<p2>, a triphone /<p1>/^<p2>/<p3>,
+        voice/stationary/normal/<p>/<n>), so this shows progress without reading its window (which fails
+        on some PCs and is slow for big banks)."""
+        from . import dbtool_io
+        base = os.path.join(self.db_path, 'voice', kind)
+        out = {}
+        for dp, _, files in os.walk(base):
+            for fn in files:
+                if fn.endswith('.dat'):
+                    continue
+                f = os.path.join(dp, fn)
+                parts = [_decode(x) for x in os.path.relpath(f, base).split(os.sep)]
+                key = dbtool_io.art_key(parts) if kind == 'articulation' else parts[1] if len(parts) > 2 else parts[0]
+                try:
+                    st = os.stat(f)
+                except OSError:
+                    continue
+                b, m = out.get(key, (0, 0))
+                out[key] = (b + st.st_size, max(m, st.st_mtime))
+        return out
+
+    def _files_done(self, kind, expected, quiet=20):
+        """Every expected unit is in the DB and nothing has been written for `quiet` seconds."""
+        got = self._db_units(kind)
+        if any(u not in got for u in expected):
+            return None
+        last = max((m for _, m in got.values()), default=0)
+        return (time.time() - last > quiet) or None
+
+    def _files_progress(self, kind):
+        got = self._db_units(kind)
+        return (len(got), sum(b for b, _ in got.values()))
+
+    def add_stationaries(self):
+        rows = self._select(COL_STAT_TO_ADD)
+        self.log('adding %d stationaries' % len(rows))
+        if rows:
+            exp = self.expected_stat
+            self._run(ADD_STAT, lambda: self._files_done('stationary', exp, quiet=10), 3 * 3600,
+                      'Add Stationaries To Database', progress=lambda: self._files_progress('stationary'), stall=300)
+            time.sleep(5)                        # it keeps saving for a moment after the last file
+
+    def optimize_epr(self):
+        btn = self.dlg.child_window(control_id=OPT_EPR)
+        self.log('optimizing EpR guides')
+        self._run(OPT_EPR, lambda: btn.is_enabled() or None, 600, 'Optimize EpR Guides')
+        time.sleep(3)
+
+    def add_articulations(self):
+        rows = self._select(COL_ART_TO_ADD)
+        exp = self.expected_art
+        self.log('adding %d articulation files (%d units)' % (len(rows), len(exp)))
+        last = [0, time.time()]
+
+        def done():
+            n = sum(1 for u in self._db_units('articulation') if u in exp)
+            if n != last[0] and time.time() - last[1] > 30:
+                self.log('  %d/%d units' % (n, len(exp)))
+                last[1] = time.time()
+            last[0] = n
+            return self._files_done('articulation', exp)
+        if rows:
+            # big banks on slow PCs take hours: no overall limit, only "nothing written for 10 minutes"
+            self._run(ADD_ART, done, 24 * 3600, 'Add Articulations To Database',
+                      progress=lambda: self._files_progress('articulation'), stall=600)
+        have = self._db_units('articulation')
+        return sorted(' '.join(u) for u in exp if u not in have)
+
+    def close(self):
+        try:
+            if self._alive():
+                h = getattr(self, 'dlg_handle', None)
+                try:
+                    if h and self._gui.IsWindow(h):
+                        self._gui.PostMessage(h, self._con.WM_COMMAND, 1, 0)       # Exit (IDOK)
+                        self._wait(lambda: not self._gui.IsWindow(h), 30, 'the segmentation dialog to close')
+                    self._menu(CMD_EXIT)
+                    self._wait(lambda: not self._alive() or None, 30, 'the DBTool to exit')
+                except DBToolError:
+                    if self._alive():
+                        self.app.kill()
+        finally:
+            shutil.rmtree(self.work, ignore_errors=True)
+
+
+def build(exe, seg_folder, db_path, name=None, dictionary=None, language='Japanese', log=print, hidden=True):
+    """Create db_path (folder\\Name) from seg_folder's dictionary.txt and add every unit. Afterwards the
+    pitch the DBTool analysed for each unit is checked; units it read an octave off get their
+    fundamental raised and the DB is built once more. hidden: run the DBTool out of sight."""
+    dictionary = os.path.abspath(dictionary or os.path.join(seg_folder, 'dictionary.txt'))
+    seg_folder = os.path.abspath(seg_folder)
+    if os.path.exists(os.path.abspath(db_path) + '.tree'):
+        raise DBToolError('%s already exists; pick a new DB name' % db_path)
+    final = os.path.abspath(db_path)
+    if not ansi_safe(os.path.basename(final)):
+        raise DBToolError('the DBTool cannot handle the DB name "%s": use plain letters and digits (A-Z, 0-9)'
+                          % os.path.basename(final))
+    os.makedirs(os.path.dirname(final), exist_ok=True)
+    stage = None
+    if not ansi_safe(final):
+        # the DBTool can't write there: build in a folder it can, and move the DB in afterwards
+        stage = _mkdtemp('dbtool_db_')
+        db_path = os.path.join(stage, os.path.basename(final))
+    try:
+        failed = _build_passes(exe, seg_folder, db_path, name, dictionary, language, log, hidden)
+    except DBToolHandoff:
+        raise
+    except BaseException:
+        if stage:
+            shutil.rmtree(stage, ignore_errors=True)
+        raise
+    if stage:
+        for part in (db_path + '.dat', db_path + '.tree', db_path):
+            shutil.move(part, final + part[len(db_path):])
+        shutil.rmtree(stage, ignore_errors=True)
+    return failed
+
+
+def _build_passes(exe, seg_folder, db_path, name, dictionary, language, log, hidden):
+    if hidden:
+        log('the DBTool runs in the background (hidden), so you can keep using the PC')
+    boosted = {}
+    for attempt in range(2):
+        failed = _build_fresh(exe, seg_folder, db_path, name, dictionary, language, log, boosted, hidden)
+        bad = octave_errors(db_path, seg_folder)
+        new = {f: f0 for _, files in bad.values() for f, f0 in files if f not in boosted}
+        if bad and (not new or attempt == 1):
+            log('the DBTool still analyses these units an octave off: %s'
+                % ', '.join('[%s] %.1fx' % (' '.join(k[1:]), r) for k, (r, _) in sorted(bad.items())))
+        if not new or attempt == 1:
+            return failed
+        log('the DBTool analysed %d unit(s) an octave off (%s): raising their fundamental and rebuilding'
+            % (len(bad), ', '.join('[%s]' % ' '.join(k[1:]) for k in sorted(bad))))
+        log('>>> pass 2 of 2: the DBTool closes and opens again and repeats every step. This is normal, '
+            "it's not a crash: let it finish.")
+        boosted.update(new)
+        _remove_db(db_path)
+
+
+def _copy_seg(seg_folder, work):
+    """The files of seg_folder only: a folder in it (often the source bank, saved next to the output) is
+    not the DBTool's, and copying one as a file fails on Windows with "Permission denied"."""
+    for fn in os.listdir(seg_folder):
+        src = os.path.join(seg_folder, fn)
+        if os.path.isfile(src):
+            shutil.copy(src, work)
+
+
+def _build_fresh(exe, seg_folder, db_path, name, dictionary, language, log, boosted, hidden):
+    """One build, from a fresh copy of seg_folder: the DBTool rewrites files in the folder it builds from
+    (stationary .wav/.as0, new .db0), which would break the next build. Out of sight first if hidden;
+    if that gets stuck, again where the DBTool shows. A shown build that trips over pywinauto losing a
+    window ("Invalid window handle") starts over once."""
+    plan = (['hidden'] if hidden else []) + ['shown', 'shown']
+    seg_dict = os.path.join(seg_folder, 'dictionary.txt')
+    for k, where in enumerate(plan):
+        work = _mkdtemp('dbtool_seg_')
+        keep = False
+        try:
+            _copy_seg(seg_folder, work)
+            # the dictionary must live in the ASCII work folder too (the DBTool exits on a non-ASCII
+            # path). Work on a fresh name each try: `dictionary` itself stays the caller's file, so a
+            # retry after this folder was deleted can still copy it instead of failing with "not found".
+            dict_work = os.path.join(work, 'dictionary.txt')
+            if os.path.normcase(dictionary) != os.path.normcase(seg_dict):
+                shutil.copy(dictionary, dict_work)
+            _boost(work, boosted)
+            if where == 'hidden':
+                return _on_hidden_desktop(
+                    lambda desk: _build(exe, work, db_path, name, dict_work, language, log, desk))
+            return _build(exe, work, db_path, name, dict_work, language, log)
+        except DBToolHandoff:
+            keep = True                      # the DBTool still uses it: keep it for the user
+            raise
+        except NoHiddenDesktop as ex:
+            log('no hidden desktop for the DBTool (%s): it runs where you can see it' % ex)
+        except DBToolFrozen as ex:
+            if k == len(plan) - 1:
+                raise
+            log('%s\n>>> closing it and starting the build again.' % ex)
+        except DBToolError as ex:
+            if where != 'hidden':
+                raise
+            log('%s\n>>> the background build got stuck, so it runs again where you can see it. '
+                'Leave the DBTool window alone until the log says the DB is built.' % ex)
+        except Exception as ex:              # noqa: BLE001 - pywinauto loses a window now and then
+            if k == len(plan) - 1:
+                raise
+            log('the DBTool automation tripped (%s); starting the build again' % ex)
+            time.sleep(3)                    # _build already closed its DBTool (its own private copy)
+        finally:
+            if not keep:
+                shutil.rmtree(work, ignore_errors=True)
+        _remove_db(db_path)
+
+
+def octave_errors(db_path, seg_folder):
+    """{unit key: (analysed / recorded pitch, [(seg file, recorded f0)])} for transition units whose
+    analysed pitch is about an octave (or more) away from the pitch they were recorded at."""
+    import csv
+    from collections import defaultdict
+    from . import dbtool_io, phonemes as P
+    got = dbtool_io.db_pitches(db_path)
+    want = defaultdict(list)
+    with open(os.path.join(seg_folder, 'manifest.csv'), encoding='utf-8-sig', newline='') as fh:
+        for r in csv.DictReader(fh):
+            ph = r['unit'].split()
+            f0 = float(r['f0_hz'] or 0)
+            # stationaries read an octave off still rendered clean (Teto's i, M, o): only transitions
+            if r['kind'] != 'art' or f0 <= 0 or not any(p.split('#')[0] in P.SUSTAINED for p in ph):
+                continue
+            key = ('art',) + tuple(ph)
+            want[key].append((r['file'], f0))
+    import numpy as np
+    bad = {}
+    for k, files in want.items():
+        if k in got:
+            ratio = got[k] / float(np.median([f0 for _, f0 in files]))
+            if ratio > 1.6 or ratio < 0.62:
+                bad[k] = (ratio, files)
+    return bad
+
+
+def _boost(folder, boosted):
+    from . import audio
+    for f, f0 in boosted.items():
+        p = os.path.join(folder, f + '.wav')
+        x, sr = audio.read_wav(p)
+        audio.write_wav(p, audio.boost_fundamental(x, sr, f0), sr)
+
+
+def _remove_db(db_path):
+    db = os.path.abspath(db_path)
+    for ext in ('.dat', '.tree'):
+        if os.path.exists(db + ext):
+            os.remove(db + ext)
+    shutil.rmtree(db, ignore_errors=True)
+
+
+def _build(exe, seg_folder, db_path, name, dictionary, language, log, desktop=None):
+    from . import dbtool_io
+    evec = dbtool_io.EVEC_STANDIN + '1' in open(dictionary, encoding='latin-1').read()
+    t = DBTool(exe, seg_folder, log, desktop)
+    if evec:
+        # EVEC colours: create the DB with stand-in names ("aX1"), rename them to "a#1" in its phoneme
+        # table, then reopen it (the DBTool's dictionary reader treats "#" as a comment)
+        try:
+            t.new_db(dictionary, db_path, language)
+            time.sleep(2)
+        finally:
+            t.quit()
+        log('EVEC: renamed %d phoneme entries' % dbtool_io.patch_evec_names(os.path.abspath(db_path)))
+        t = DBTool(exe, seg_folder, log, desktop)
+    t.expected_art, t.expected_stat = expected_units(seg_folder)
+    step = 'creating the DB'
+    try:
+        if evec:
+            t.load_db(db_path)
+        else:
+            t.new_db(dictionary, db_path, language)
+        step = 'opening Automatic Segmentation'
+        t.open_auto_segmentation()
+        step = 'Add Stationaries To Database'
+        t.add_stationaries()
+        step = 'Optimize EpR Guides'
+        t.optimize_epr()
+        step = 'Add Articulations To Database'
+        failed = t.add_articulations()
+    except DBToolError as ex:
+        if (step.startswith(('Add', 'Optimize', 'opening')) and t._alive() and not t.hidden
+                and not isinstance(ex, NoFiles)):
+            # Leave the DBTool open on its list (and its files in place): the user can finish by hand.
+            # Closing it here used to delete the folder it was building from, so that failed too.
+            # (Out of sight nobody could: it is closed and the build runs again where it shows.)
+            log('%s' % ex)
+            raise DBToolHandoff(HANDOFF % (step, os.path.abspath(db_path), seg_folder)) from ex
+        t.close()
+        raise
+    except Exception as ex:
+        if t.hidden:
+            t.close()
+            raise DBToolError('%s: %s' % (step, ex)) from ex
+        if step.startswith(('Add', 'Optimize', 'opening')) and t._alive():
+            log('%s' % ex)                       # same: don't pull the DBTool away mid-way
+            raise DBToolHandoff(HANDOFF % (step, os.path.abspath(db_path), seg_folder)) from ex
+        t.close()
+        raise
+    except BaseException:
+        t.close()
+        raise
+    t.close()
+    inf = os.path.join(os.path.abspath(db_path), 'singer.inf')
+    if name and os.path.exists(inf):
+        txt = open(inf, encoding='latin-1').read()
+        txt = txt.replace('Name = "Undefined"', 'Name = "%s"' % name)
+        open(inf, 'w', encoding='latin-1').write(txt)
+    return failed
